@@ -3,6 +3,7 @@
 // The lock is released as soon as the CSV is stored; downloading never holds it.
 
 import { csvChunks } from '../../lib/csv.js';
+import { zipSingleFile } from '../../lib/zip.js';
 import { getInstrument } from '../../config/catalog.js';
 import {
   AbortedError,
@@ -73,9 +74,9 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       }
 
       objectKey = exportKey(exportId);
-      await storage.putChunks(objectKey, csvChunks(segments, { displayDecimals: getInstrument(instrument).displayDecimals }), {
-        contentType: 'text/csv; charset=utf-8',
-      });
+      // The CSV is compressed into a ZIP while it is generated; downloads are always a .zip.
+      const csv = csvChunks(segments, { displayDecimals: getInstrument(instrument).displayDecimals });
+      await storage.putChunks(objectKey, zipSingleFile(`${instrument}_${timeframe}_${start}_${end}.csv`, csv, clock()), { contentType: 'application/zip' });
       handle.signal.throwIfAborted();
       const head = await storage.headObject(objectKey);
       if (!head) throw new Error('stored CSV not found');
@@ -120,7 +121,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         expiresInSeconds: Math.max(0, Math.ceil((row.expiresAt - now) / 1000)),
         fileSize: row.fileSize,
         rows: row.rowCount,
-        filename: `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.csv`,
+        filename: `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.zip`,
       };
     }
     return {
