@@ -48,7 +48,7 @@ export function datasetQuarantineKey(instrument, timeframe, year, stampMs) {
 
 export function exportKey(exportId) {
   if (!EXPORT_ID_RE.test(exportId)) throw new Error('invalid export id');
-  return `${EXPORT_PREFIX}${exportId}.csv`;
+  return `${EXPORT_PREFIX}${exportId}.zip`;
 }
 
 export const isExportKey = (key) => typeof key === 'string' && key.startsWith(EXPORT_PREFIX) && !key.includes('..');
