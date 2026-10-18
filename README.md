@@ -54,7 +54,9 @@ Tables: `datasets` (status, coverage `first/last_complete_date`, hash, size, can
 (job + download authorization: `created_at`, `expires_at`, **SHA-256 of the token, never the token**).
 The schema is created automatically at startup.
 
-### CSV format
+### CSV format (delivered inside a .zip)
+Every download is a **`.zip`** named like `EUR_USD_M1_2025-06-15_2025-08-20.zip`, containing exactly one file with the same name ending `.csv`. It is compressed while it is generated (`backend/lib/zip.js`, pure `node:zlib`, no dependency), so memory stays flat. It opens with Windows Explorer, macOS, 7-Zip and `unzip`.
+
 ```
 timestamp,open,high,low,close,volume
 2025-06-15T00:00:00Z,1.07123,1.07150,1.07101,1.07140,57
@@ -181,7 +183,7 @@ npm run smoke            # live check of Postgres + R2 + OANDA (needs real crede
 
 ## 9. What was tested, and what was NOT
 
-### Actually run (114 automated tests, all passing: `npm test`, about 3 s)
+### Actually run (119 automated tests, all passing: `npm test`, about 3 s)
 | File | Tests | Covers |
 |---|---:|---|
 | `calendar.test.js` | 20 | complete-day logic, no rolling 24h, UTC boundaries, settle window, current/future/inverted/malformed dates, no shortened ranges, cross-month/year, day states |
@@ -191,6 +193,7 @@ npm run smoke            # live check of Postgres + R2 + OANDA (needs real crede
 | `exports.test.js` | 22 | CSV content/filtering/inclusive end, single- and cross-year loading, 5-minute expiry to the second, refresh recovery, multiple downloads, expired rejection with object present, cleanup, SYSTEM BUSY, failed-job release, maintenance vs user, catch-up, year transition |
 | `recovery.test.js` | 11 | stale lock + orphan jobs, restart before/after expiry, crash during CSV write, abandoned staging, orphan sweep, crash during download, corrupted-data rebuild, row purge |
 | `security.test.js` | 14 | injection/traversal inputs, key safety, guessed/malformed tokens, other-session access, no secrets in pages/API/logs, headers/cookie, static traversal, HTTPS redirect, rate limiting |
+| `zip.test.js` | 5 | ZIP round trip + CRC, empty/30 MB input, readable by Python `zipfile` and `unzip -t`, source failure, consumer abort, end-to-end download is a valid single-entry `.zip` |
 | `health.test.js` | 7 | `/health` with no services, DB down, job running, shutting down, no rate limit/redirect/cookie, **latency under heavy CPU work**, and a **real `node backend/server.js` process** booting with no config and exiting 0 on SIGTERM |
 
 ### NOT tested against real infrastructure (nothing here claims otherwise)
@@ -226,7 +229,7 @@ backend/middleware/  http helpers (session, headers, rate limit), static files
 backend/services/    oanda/ r2/ datasets/ exports/ jobs/
 backend/workers/     cleanup + recovery, maintenance, keep-alive
 scripts/smoke.js     live-infrastructure check
-tests/               114 tests + helpers (in-memory R2, fake OANDA, harness)
+tests/               119 tests + helpers (in-memory R2, fake OANDA, harness)
 docs/BINARY_FORMAT.md
 render.yaml  .env.example  package.json
 ```
