@@ -107,7 +107,7 @@ function renderJob(job) {
   setBusy(false);
 
   if (job.status === 'READY' && job.download) {
-    showStatus('ok', 'Your CSV is ready.', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
+    showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
     els.link.href = job.download.url;
     els.link.setAttribute('download', job.download.filename);
     els.meta.textContent = `${job.download.rows.toLocaleString()} rows · ${formatBytes(job.download.fileSize)}`;
