@@ -27,12 +27,12 @@ describe('CSV generation', () => {
     const c = h.browser();
     const job = await generate(c, '2026-09-01', '2026-09-13');
     assert.equal(job.status, 'READY');
-    assert.equal(job.download.filename, 'EUR_USD_M1_2026-09-01_2026-09-13.csv');
+    assert.equal(job.download.filename, 'EUR_USD_M1_2026-09-01_2026-09-13.zip');
 
     const csv = await c.request(job.download.url);
     assert.equal(csv.status, 200);
-    assert.match(csv.headers.get('content-type'), /text\/csv/);
-    assert.match(csv.headers.get('content-disposition'), /attachment; filename="EUR_USD_M1_2026-09-01_2026-09-13\.csv"/);
+    assert.match(csv.headers.get('content-type'), /application\/zip/);
+    assert.match(csv.headers.get('content-disposition'), /attachment; filename="EUR_USD_M1_2026-09-01_2026-09-13\.zip"/);
     assert.equal(csv.text.split('\n')[0], 'timestamp,open,high,low,close,volume');
 
     const rows = parseCsv(csv.text);
