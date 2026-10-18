@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 const els = {
   form: $('export-form'),
   instrument: $('instrument'),
+  search: $('instrument-search'),
+  list: $('instrument-list'),
   timeframe: $('timeframe'),
   start: $('start'),
   end: $('end'),
@@ -193,10 +195,106 @@ els.form.addEventListener('submit', async (event) => {
   }
 });
 
+// ---- Searchable instrument picker (type to filter, arrow keys / click to choose, list scrolls) ----
+const combo = { all: [], shown: [], active: -1 };
+const label = (code) => code.replace('_', '/');
+
+function comboOpen(open) {
+  els.list.classList.toggle('hidden', !open);
+  els.search.setAttribute('aria-expanded', String(open));
+}
+
+function comboRender(showAll = false) {
+  const q = showAll ? '' : els.search.value.trim().toLowerCase().replace(/[\/_\s-]/g, '');
+  combo.shown = combo.all.filter((c) => c.replace('_', '').toLowerCase().includes(q));
+  els.list.textContent = '';
+  if (!combo.shown.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'No matching instrument';
+    els.list.append(li);
+    combo.active = -1;
+    return;
+  }
+  combo.shown.forEach((code, i) => {
+    const li = document.createElement('li');
+    li.id = `inst-${code}`;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', String(code === els.instrument.value));
+    li.dataset.code = code;
+    li.textContent = label(code);
+    els.list.append(li);
+    if (code === els.instrument.value && combo.active < 0) combo.active = i;
+  });
+  comboActivate(combo.active >= 0 && combo.active < combo.shown.length ? combo.active : 0);
+}
+
+function comboActivate(i) {
+  els.list.querySelector('.active')?.classList.remove('active');
+  combo.active = i;
+  const li = els.list.children[i];
+  if (!li || li.classList.contains('empty')) return;
+  li.classList.add('active');
+  els.search.setAttribute('aria-activedescendant', li.id);
+  li.scrollIntoView({ block: 'nearest' });
+}
+
+function comboChoose(code) {
+  els.instrument.value = code;
+  els.search.value = label(code);
+  comboOpen(false);
+}
+
+function comboRestore() {
+  // Leaving the box without a valid choice puts the last valid selection back.
+  els.search.value = els.instrument.value ? label(els.instrument.value) : '';
+  comboOpen(false);
+}
+
+els.search.addEventListener('focus', () => {
+  els.search.select();
+  combo.active = -1;
+  comboRender(true); // show every pair first; typing then filters
+  comboOpen(true);
+});
+els.search.addEventListener('input', () => {
+  combo.active = -1;
+  comboRender();
+  comboOpen(true);
+});
+els.search.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (els.list.classList.contains('hidden')) {
+      comboRender(true);
+      comboOpen(true);
+      return;
+    }
+    const n = combo.shown.length;
+    if (n) comboActivate((combo.active + (e.key === 'ArrowDown' ? 1 : -1) + n) % n);
+  } else if (e.key === 'Enter') {
+    if (!els.list.classList.contains('hidden') && combo.shown[combo.active]) {
+      e.preventDefault();
+      comboChoose(combo.shown[combo.active]);
+    }
+  } else if (e.key === 'Escape') {
+    comboRestore();
+  }
+});
+els.search.addEventListener('blur', () => setTimeout(comboRestore, 120)); // after a click on an option registers
+els.list.addEventListener('mousedown', (e) => {
+  const li = e.target.closest('li[data-code]');
+  if (li) {
+    e.preventDefault();
+    comboChoose(li.dataset.code);
+  }
+});
+
 async function init() {
   try {
     const cfg = await api('/api/config');
-    for (const code of cfg.instruments) els.instrument.add(new Option(code.replace('_', '/'), code));
+    combo.all = [...cfg.instruments].sort();
+    comboChoose(combo.all.includes('EUR_USD') ? 'EUR_USD' : combo.all[0]);
     for (const code of cfg.timeframes) els.timeframe.add(new Option(code, code));
     els.start.min = els.end.min = `${cfg.minDataYear}-01-01`;
     els.start.max = els.end.max = cfg.latestSelectableDate; // yesterday (UTC): today is never available

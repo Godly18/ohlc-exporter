@@ -8,21 +8,20 @@ const TIMEFRAMES = new Map([
 ]);
 
 /**
- * Supported instruments. `displayDecimals` is the minimum number of decimals printed in CSV
- * (prices are stored at 1e-5 resolution regardless).
+ * Supported instruments: the 68 forex pairs OANDA serves candles for on its practice API.
+ * `displayDecimals` is the minimum number of decimals printed in CSV (prices are stored at 1e-5
+ * resolution regardless): 3 for pairs quoted in JPY, HUF, CZK or THB, otherwise 5.
+ * Stored prices are int32 x 1e5, so the largest representable price is about 21,474 (all pairs here are far below).
  */
-const INSTRUMENTS = new Map([
-  ['EUR_USD', Object.freeze({ code: 'EUR_USD', displayDecimals: 5 })],
-  ['GBP_USD', Object.freeze({ code: 'GBP_USD', displayDecimals: 5 })],
-  ['USD_JPY', Object.freeze({ code: 'USD_JPY', displayDecimals: 3 })],
-  ['AUD_USD', Object.freeze({ code: 'AUD_USD', displayDecimals: 5 })],
-  ['USD_CAD', Object.freeze({ code: 'USD_CAD', displayDecimals: 5 })],
-  ['USD_CHF', Object.freeze({ code: 'USD_CHF', displayDecimals: 5 })],
-  ['NZD_USD', Object.freeze({ code: 'NZD_USD', displayDecimals: 5 })],
-  ['EUR_GBP', Object.freeze({ code: 'EUR_GBP', displayDecimals: 5 })],
-  ['EUR_JPY', Object.freeze({ code: 'EUR_JPY', displayDecimals: 3 })],
-  ['GBP_JPY', Object.freeze({ code: 'GBP_JPY', displayDecimals: 3 })],
-]);
+const INSTRUMENT_CODES = ['AUD_CAD', 'AUD_CHF', 'AUD_HKD', 'AUD_JPY', 'AUD_NZD', 'AUD_SGD', 'AUD_USD', 'CAD_CHF', 'CAD_HKD', 'CAD_JPY', 'CAD_SGD', 'CHF_HKD', 'CHF_JPY', 'CHF_ZAR', 'EUR_AUD', 'EUR_CAD', 'EUR_CHF', 'EUR_CZK', 'EUR_DKK', 'EUR_GBP', 'EUR_HKD', 'EUR_HUF', 'EUR_JPY', 'EUR_NOK', 'EUR_NZD', 'EUR_PLN', 'EUR_SEK', 'EUR_SGD', 'EUR_TRY', 'EUR_USD', 'EUR_ZAR', 'GBP_AUD', 'GBP_CAD', 'GBP_CHF', 'GBP_HKD', 'GBP_JPY', 'GBP_NZD', 'GBP_PLN', 'GBP_SGD', 'GBP_USD', 'GBP_ZAR', 'HKD_JPY', 'NZD_CAD', 'NZD_CHF', 'NZD_HKD', 'NZD_JPY', 'NZD_SGD', 'NZD_USD', 'SGD_CHF', 'SGD_JPY', 'TRY_JPY', 'USD_CAD', 'USD_CHF', 'USD_CNH', 'USD_CZK', 'USD_DKK', 'USD_HKD', 'USD_HUF', 'USD_JPY', 'USD_MXN', 'USD_NOK', 'USD_PLN', 'USD_SEK', 'USD_SGD', 'USD_THB', 'USD_TRY', 'USD_ZAR', 'ZAR_JPY'];
+const THREE_DECIMAL_QUOTES = ['JPY', 'HUF', 'CZK', 'THB'];
+
+const INSTRUMENTS = new Map(
+  INSTRUMENT_CODES.map((code) => [
+    code,
+    Object.freeze({ code, displayDecimals: THREE_DECIMAL_QUOTES.includes(code.slice(4)) ? 3 : 5 }),
+  ]),
+);
 
 export function getInstrument(code) {
   return typeof code === 'string' ? INSTRUMENTS.get(code) ?? null : null;

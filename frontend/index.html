@@ -17,10 +17,16 @@
       <h2 id="form-title" class="visually-hidden">Request data</h2>
       <form id="export-form" novalidate>
         <div class="grid">
-          <label class="field">
-            <span>Instrument</span>
-            <select id="instrument" name="instrument" required></select>
-          </label>
+          <div class="field">
+            <label for="instrument-search" id="instrument-label">Instrument</label>
+            <div class="combo" id="combo">
+              <input id="instrument-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false"
+                     aria-controls="instrument-list" aria-labelledby="instrument-label" autocomplete="off" spellcheck="false"
+                     placeholder="Search e.g. EUR, JPY, GBP/USD">
+              <input id="instrument" name="instrument" type="hidden" required>
+              <ul id="instrument-list" class="combo-list hidden" role="listbox" aria-labelledby="instrument-label"></ul>
+            </div>
+          </div>
           <label class="field">
             <span>Timeframe</span>
             <select id="timeframe" name="timeframe" required></select>
