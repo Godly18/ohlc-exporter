@@ -1,0 +1,22 @@
+{
+  "name": "oanda-ohlc-exporter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OANDA historical OHLC web app: yearly binary datasets in Cloudflare R2, temporary CSV exports, single global job lock. Built for Render's free tier.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node --env-file-if-exists=.env --watch backend/server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"tests/**/*.test.js\"",
+    "smoke": "node --env-file-if-exists=.env scripts/smoke.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.730.0",
+    "@aws-sdk/lib-storage": "^3.730.0",
+    "pg": "^8.13.0"
+  },
+  "license": "UNLICENSED"
+}

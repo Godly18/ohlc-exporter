@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OANDA OHLC Exporter</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="head">
+      <h1>OANDA OHLC Exporter</h1>
+      <p class="sub">Download historical candles as CSV. Dates are <strong>complete UTC calendar days</strong>; the end date is inclusive.</p>
+    </header>
+
+    <section class="card" aria-labelledby="form-title">
+      <h2 id="form-title" class="visually-hidden">Request data</h2>
+      <form id="export-form" novalidate>
+        <div class="grid">
+          <label class="field">
+            <span>Instrument</span>
+            <select id="instrument" name="instrument" required></select>
+          </label>
+          <label class="field">
+            <span>Timeframe</span>
+            <select id="timeframe" name="timeframe" required></select>
+          </label>
+          <label class="field">
+            <span>Start date (UTC)</span>
+            <input id="start" name="start_date" type="date" required>
+          </label>
+          <label class="field">
+            <span>End date (UTC)</span>
+            <input id="end" name="end_date" type="date" required>
+          </label>
+        </div>
+        <button id="submit" type="submit" class="primary">Generate CSV</button>
+        <p id="hint" class="hint"></p>
+      </form>
+    </section>
+
+    <section id="status" class="card status hidden" role="status" aria-live="polite">
+      <div id="status-title" class="status-title"></div>
+      <div id="status-text" class="status-text"></div>
+      <div id="bar" class="bar hidden"><div id="bar-fill" class="bar-fill"></div></div>
+      <div id="download" class="download hidden">
+        <a id="download-link" class="primary link-button" href="#" download>Download CSV</a>
+        <div class="meta">
+          <span id="download-meta"></span>
+          <span>Expires in <strong id="countdown">--:--</strong></span>
+        </div>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <p>Only one data job runs at a time. If the system is busy, try again shortly. Today's UTC date and any day that has not been fully processed and verified are never returned.</p>
+    </footer>
+  </main>
+  <script src="/js/app.js" type="module"></script>
+</body>
+</html>
