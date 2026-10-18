@@ -1,5 +1,6 @@
 // Test harness: real services + real HTTP server, with SQLite, in-memory R2 and fake OANDA.
 
+import { unzipSingle } from './unzip.js';
 import http from 'node:http';
 import { createApp } from '../../backend/app.js';
 import { createServices } from '../../backend/bootstrap.js';
@@ -76,14 +77,16 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
         });
         const set = res.headers.get('set-cookie');
         if (set) cookie = set.split(';')[0];
-        const text = await res.text();
+        const raw = Buffer.from(await res.arrayBuffer());
+        const isZip = (res.headers.get('content-type') ?? '').includes('application/zip');
+        const text = isZip ? unzipSingle(raw).data.toString('utf8') : raw.toString("utf8"); // zip responses expose the CSV inside
         let json = null;
         try {
           json = JSON.parse(text);
         } catch {
           /* not JSON (CSV, HTML) */
         }
-        return { status: res.status, json, text, headers: res.headers };
+        return { status: res.status, json, text, body: raw, headers: res.headers };
       },
     };
   }
