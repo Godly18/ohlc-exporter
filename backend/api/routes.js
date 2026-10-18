@@ -79,9 +79,9 @@ export function createRoutes(ctx) {
         const row = await svc().exportService.authorizeDownload(param); // enforces token + expiry
         const obj = await svc().storage.getObjectStream(row.objectKey);
         if (!obj) throw Errors.expired();
-        const filename = `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.csv`;
+        const filename = `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.zip`;
         res.writeHead(200, {
-          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Type': 'application/zip',
           'Content-Disposition': `attachment; filename="${filename}"`,
           'Cache-Control': 'no-store',
           ...(obj.size != null ? { 'Content-Length': obj.size } : {}),
