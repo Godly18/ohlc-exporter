@@ -3,6 +3,7 @@
 // The lock is released as soon as the CSV is stored; downloading never holds it.
 
 import { csvChunks } from '../../lib/csv.js';
+import { csvOptionsFor } from '../../lib/exportFile.js';
 import { zipSingleFile } from '../../lib/zip.js';
 import { getInstrument } from '../../config/catalog.js';
 import {
@@ -18,7 +19,7 @@ import { validateExportRequest } from '../../lib/validation.js';
 import { ExportStatus } from '../../database/exportsRepo.js';
 import { exportKey } from '../r2/keys.js';
 
-export function createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock }) {
+export function createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport = null }) {
   const inflight = new Set();
 
   function mapError(err, handle) {
@@ -33,6 +34,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
   async function runJob(handle, job) {
     const { jobId, exportId, instrument, timeframe, start, end } = job;
     let objectKey = null;
+    let ghKey = null;
     let lastProgressWrite = 0;
     const onProgress = (p) => {
       const now = Date.now();
@@ -73,27 +75,51 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         rows += i1 - i0;
       }
 
-      objectKey = exportKey(exportId);
-      // The CSV is compressed into a ZIP while it is generated; downloads are always a .zip.
-      const csv = csvChunks(segments, { displayDecimals: getInstrument(instrument).displayDecimals });
-      await storage.putChunks(objectKey, zipSingleFile(`${instrument}_${timeframe}_${start}_${end}.csv`, csv, clock()), { contentType: 'application/zip' });
+      if (rows === 0) throw Errors.noData(); // e.g. a pair that was not listed yet, or a weekend-only range
+
+      let fileSize;
+      if (config.exportMode === 'github' && githubExport) {
+        // Production: GitHub Actions reads the datasets from R2, builds and zips the CSV, and the user
+        // downloads it from GitHub (the download link redirects there). Nothing is streamed by this server.
+        loaded.length = 0; // free the in-memory datasets while GitHub works
+        segments.length = 0;
+        const art = await githubExport.generate({
+          exportId,
+          instrument,
+          timeframe,
+          start,
+          end,
+          signal: handle.signal,
+          onProgress: (p) => exportsRepo.updateProgress(jobId, p).catch(() => {}),
+        });
+        objectKey = null; // nothing to clean up in R2
+        ghKey = art.objectKey;
+        fileSize = art.size;
+      } else {
+        // Local/development mode: the server builds the ZIP into R2 and streams it itself.
+        objectKey = exportKey(exportId);
+        const csv = csvChunks(segments, csvOptionsFor(getInstrument(instrument)));
+        await storage.putChunks(objectKey, zipSingleFile(`${instrument}_${timeframe}_${start}_${end}.csv`, csv, clock()), { contentType: 'application/zip' });
+        handle.signal.throwIfAborted();
+        const head = await storage.headObject(objectKey);
+        if (!head) throw new Error('stored ZIP not found');
+        fileSize = head.size;
+      }
       handle.signal.throwIfAborted();
-      const head = await storage.headObject(objectKey);
-      if (!head) throw new Error('stored CSV not found');
 
       const createdAt = clock();
       const expiresAt = createdAt + config.exportExpirationMinutes * 60_000;
       const token = deriveDownloadToken(config.exportTokenSecret, exportId);
       const ok = await exportsRepo.markReady(jobId, {
-        objectKey,
-        fileSize: head.size,
+        objectKey: ghKey ?? objectKey,
+        fileSize,
         rowCount: rows,
         tokenHash: sha256Hex(token),
         createdAt,
         expiresAt,
       });
       if (!ok) throw new AbortedError('job was no longer active');
-      logger.info('export ready', { jobId, rows, bytes: head.size, expiresAt: new Date(expiresAt).toISOString() });
+      logger.info('export ready', { jobId, rows, bytes: fileSize, mode: ghKey ? 'github' : 'server', expiresAt: new Date(expiresAt).toISOString() });
     } catch (err) {
       const mapped = mapError(err, handle);
       logger.error('export failed', { jobId, code: mapped.code, error: err });

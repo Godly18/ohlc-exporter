@@ -1,13 +1,7 @@
-<<<<<<< HEAD
 // Test-side ZIP reader: the production reader, made synchronous-looking for the harness.
 import zlib from 'node:zlib';
 
 /** Independent synchronous implementation (kept separate from backend/lib/unzip.js on purpose). */
-=======
-// Tiny independent ZIP reader for tests (reads the central directory, verifies CRC-32).
-import zlib from 'node:zlib';
-
->>>>>>> e209939a43ebc017b0653da4e4fb04b9ff9c165b
 export function unzipSingle(buf) {
   const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
   if (eocd < 0) throw new Error('no end-of-central-directory');
