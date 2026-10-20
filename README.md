@@ -233,7 +233,11 @@ npm run smoke            # live check of Postgres, R2, OANDA, Binance, Twelve Da
 
 ## 9. What was tested, and what was NOT
 
+<<<<<<< HEAD
 ### Actually run (176 automated tests, all passing: `npm test`, about 10 s)
+=======
+### Actually run (119 automated tests, all passing: `npm test`, about 3 s)
+>>>>>>> e209939a43ebc017b0653da4e4fb04b9ff9c165b
 | File | Tests | Covers |
 |---|---:|---|
 | `calendar.test.js` | 20 | complete-day logic, no rolling 24h, UTC boundaries, settle window, current/future/inverted/malformed dates, no shortened ranges, cross-month/year, day states |
@@ -244,10 +248,13 @@ npm run smoke            # live check of Postgres, R2, OANDA, Binance, Twelve Da
 | `recovery.test.js` | 11 | stale lock + orphan jobs, restart before/after expiry, crash during CSV write, abandoned staging, orphan sweep, crash during download, corrupted-data rebuild, row purge |
 | `security.test.js` | 14 | injection/traversal inputs, key safety, guessed/malformed tokens, other-session access, no secrets in pages/API/logs, headers/cookie, static traversal, HTTPS redirect, rate limiting |
 | `zip.test.js` | 5 | ZIP round trip + CRC, empty/30 MB input, readable by Python `zipfile` and `unzip -t`, source failure, consumer abort, end-to-end download is a valid single-entry `.zip` |
+<<<<<<< HEAD
 | `format2.test.js` | 11 | catalog (68 + 23 + 1, providers, first years), exact decimal parsing, format v2 round trip/tamper/scales, v1 files still decode, CSV decimals |
 | `sources.test.js` | 15 | Binance archive (real zips, checksum, microsecond timestamps, month cache, API fallback, paging, retries) and Twelve Data (windowing, rounding, rate/daily limits, truncation) against faked HTTP |
 | `markets.test.js` | 13 | 2018/2021 year enforcement, XAUUSD hidden without a key, crypto and gold end-to-end builds, leading-vs-mid-history empty days, "no data", provider routing |
 | `github.test.js` | 18 | offload end-to-end (no R2 export object, 302 redirect, zero bytes through the server), 5-minute expiry + artifact/run cleanup, lock held until ready, timeout/cancel, failed or never-started runs, GitHub REST client |
+=======
+>>>>>>> e209939a43ebc017b0653da4e4fb04b9ff9c165b
 | `health.test.js` | 7 | `/health` with no services, DB down, job running, shutting down, no rate limit/redirect/cookie, **latency under heavy CPU work**, and a **real `node backend/server.js` process** booting with no config and exiting 0 on SIGTERM |
 
 ### NOT tested against real infrastructure (nothing here claims otherwise)
@@ -291,9 +298,13 @@ backend/middleware/  http helpers (session, headers, rate limit), static files
 backend/services/    oanda/ binance/ twelvedata/ github/ sources/ r2/ datasets/ exports/ jobs/
 backend/workers/     cleanup + recovery, maintenance, keep-alive
 scripts/smoke.js     live-infrastructure check
+<<<<<<< HEAD
 scripts/export-csv.js  runs inside GitHub Actions: R2 -> verified CSV
 .github/workflows/export-csv.yml   the export workflow
 tests/               176 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
+=======
+tests/               119 tests + helpers (in-memory R2, fake OANDA, harness)
+>>>>>>> e209939a43ebc017b0653da4e4fb04b9ff9c165b
 docs/BINARY_FORMAT.md
 render.yaml  .env.example  package.json
 ```
