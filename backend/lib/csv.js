@@ -2,8 +2,10 @@
 //   header : timestamp,open,high,low,close,volume
 //   rows   : 2025-06-15T00:00:00Z,1.07123,1.07150,1.07101,1.07140,57
 //   - timestamp is ISO 8601 UTC with a trailing Z and second precision (candle OPEN time)
-//   - prices are decimal, at least the instrument's display decimals, up to 5, no thousands separators
-//   - volume is an integer tick count; line ending is \n
+//   - prices are decimal, at least the instrument's display decimals (trailing zeros beyond that are
+//     trimmed), up to the instrument's full precision (5 for forex/gold, 8 for crypto), no thousands separators
+//   - volume is an integer tick count (forex/gold) or the base-asset amount with up to 8 decimals (crypto);
+//     line ending is \n
 // Produced as an async generator of Buffers so memory stays flat and the event loop stays free.
 
 import { PRICE_SCALE } from './candles.js';
@@ -12,17 +14,23 @@ import { yieldToLoop } from './yield.js';
 export const CSV_HEADER = 'timestamp,open,high,low,close,volume\n';
 
 const PAD2 = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
-const FRACTION_DIGITS = String(PRICE_SCALE).length - 1; // 5
 const LINES_PER_CHUNK = 2000;
 
-export function formatPrice(scaled, minDecimals) {
+/** Format an integer scaled by `scale` (a power of ten) as a decimal string with at least `minDecimals`. */
+export function formatScaled(scaled, minDecimals, scale) {
+  const digits = String(scale).length - 1;
   const negative = scaled < 0;
   const abs = Math.abs(scaled);
-  const whole = Math.floor(abs / PRICE_SCALE);
-  const frac = String(abs % PRICE_SCALE).padStart(FRACTION_DIGITS, '0');
-  let end = FRACTION_DIGITS;
+  if (digits === 0) return `${negative ? '-' : ''}${abs}`;
+  const whole = Math.floor(abs / scale);
+  const frac = String(abs % scale).padStart(digits, '0');
+  let end = digits;
   while (end > minDecimals && frac.charCodeAt(end - 1) === 48) end--;
-  return `${negative ? '-' : ''}${whole}.${frac.slice(0, end)}`;
+  return end === 0 ? `${negative ? '-' : ''}${whole}` : `${negative ? '-' : ''}${whole}.${frac.slice(0, end)}`;
+}
+
+export function formatPrice(scaled, minDecimals, scale = PRICE_SCALE) {
+  return formatScaled(scaled, minDecimals, scale);
 }
 
 export function formatTimestamp(tsSec) {
@@ -36,7 +44,7 @@ export function formatTimestamp(tsSec) {
  * @param segments  [{ set: CandleSet, from: number, to: number }] index ranges [from, to), in
  *                  chronological order across segments.
  */
-export async function* csvChunks(segments, { displayDecimals }) {
+export async function* csvChunks(segments, { displayDecimals, priceScale = PRICE_SCALE, volumeScale = 1 }) {
   yield Buffer.from(CSV_HEADER, 'ascii');
 
   let cachedDay = -1;
@@ -55,8 +63,9 @@ export async function* csvChunks(segments, { displayDecimals }) {
       const s = ts - day * 86_400;
       lines +=
         `${cachedDate}${PAD2[Math.floor(s / 3600)]}:${PAD2[Math.floor((s % 3600) / 60)]}:${PAD2[s % 60]}Z,` +
-        `${formatPrice(set.o[i], displayDecimals)},${formatPrice(set.h[i], displayDecimals)},` +
-        `${formatPrice(set.l[i], displayDecimals)},${formatPrice(set.c[i], displayDecimals)},${set.v[i]}\n`;
+        `${formatScaled(set.o[i], displayDecimals, priceScale)},${formatScaled(set.h[i], displayDecimals, priceScale)},` +
+        `${formatScaled(set.l[i], displayDecimals, priceScale)},${formatScaled(set.c[i], displayDecimals, priceScale)},` +
+        `${volumeScale === 1 ? set.v[i] : formatScaled(set.v[i], 0, volumeScale)}\n`;
 
       if (++count === LINES_PER_CHUNK) {
         yield Buffer.from(lines, 'ascii');

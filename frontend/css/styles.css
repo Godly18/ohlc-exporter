@@ -128,8 +128,9 @@ body {
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
-.combo-list li { padding: 9px 10px; border-radius: 6px; color: var(--text); cursor: pointer; font-size: 0.95rem; }
+.combo-list li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px; color: var(--text); cursor: pointer; font-size: 0.95rem; }
 .combo-list li[aria-selected="true"] { font-weight: 600; }
 .combo-list li.active { background: var(--accent); color: var(--accent-text); }
 .combo-list li.empty { color: var(--muted); cursor: default; }
 .combo-list.hidden { display: none; }
+.combo-list .tag { font-size: 0.72rem; opacity: 0.65; text-transform: uppercase; letter-spacing: 0.04em; }

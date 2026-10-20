@@ -19,17 +19,19 @@ import {
   yearEndDate,
   yearStartDate,
 } from '../../lib/time.js';
-import { validateCandleSet, validateDayCandles } from '../../lib/validation.js';
-import { getTimeframe } from '../../config/catalog.js';
+import { limitsFor, validateCandleSet, validateDayCandles } from '../../lib/validation.js';
+import { getInstrument, getTimeframe } from '../../config/catalog.js';
 import { Activity, DatasetStatus } from '../../database/datasetsRepo.js';
 import { datasetKey, datasetQuarantineKey, datasetTmpKey } from '../r2/keys.js';
 
-export function createDatasetService({ repo, storage, oanda, config, logger, clock }) {
+export function createDatasetService({ repo, storage, source, config, logger, clock }) {
   const stepOf = (timeframe) => getTimeframe(timeframe).seconds;
 
   /** Decode + fully validate a dataset file. Throws FormatError when it is not trustworthy. */
   async function verifyBuffer(buf, identity) {
-    const { header, set } = await decodeDataset(buf, identity);
+    const inst = getInstrument(identity.instrument);
+    const expected = inst ? { ...identity, priceScale: inst.priceScale, volumeScale: inst.volumeScale } : identity;
+    const { header, set } = await decodeDataset(buf, expected);
     if (!header.completeThrough) throw new FormatError('no coverage recorded');
     const reason = await validateCandleSet(set, {
       year: identity.year,
@@ -142,19 +144,28 @@ export function createDatasetService({ repo, storage, oanda, config, logger, clo
     });
   }
 
-  async function fetchValidatedDay(identity, day, signal) {
-    const { candles, incompleteCount } = await oanda.fetchDayCandles({
+  /**
+   * One complete, validated UTC day from the instrument's provider.
+   * Empty days: 'fx' calendars (forex, gold) may be empty only when the market is closed; 'always'
+   * calendars (crypto) may be empty only BEFORE the pair's first candle (not yet listed). Anything else
+   * means the source does not have the day yet, so the build stops rather than leaving a silent gap.
+   */
+  async function fetchValidatedDay(identity, day, signal, { lastDay, haveCandles }) {
+    const inst = getInstrument(identity.instrument);
+    const { candles, incompleteCount } = await source.fetchDayCandles({
       instrument: identity.instrument,
       timeframe: identity.timeframe,
       date: day,
+      lastDay,
       signal,
     });
     if (incompleteCount > 0) throw new DataNotReadyError(`source still reports incomplete candles for ${day}`, day);
     if (candles.length === 0) {
-      if (isMarketClosedDay(day, config.extraClosedDates)) return candles;
+      const legitimate = inst?.calendar === 'always' ? !haveCandles : isMarketClosedDay(day, config.extraClosedDates);
+      if (legitimate) return candles;
       throw new DataNotReadyError(`source returned no candles for trading day ${day}`, day);
     }
-    const reason = validateDayCandles(candles, day, stepOf(identity.timeframe));
+    const reason = validateDayCandles(candles, day, stepOf(identity.timeframe), limitsFor(inst));
     if (reason) throw new DatasetBuildError(`invalid data for ${day}: ${reason}`);
     return candles;
   }
@@ -214,7 +225,7 @@ export function createDatasetService({ repo, storage, oanda, config, logger, clo
         for (; day <= target; day = addDays(day, 1)) {
           signal?.throwIfAborted();
           await repo.setDay(instrument, timeframe, day, 'DOWNLOADING');
-          const candles = await fetchValidatedDay(identity, day, signal);
+          const candles = await fetchValidatedDay(identity, day, signal, { lastDay: target, haveCandles: working.length > 0 });
           working.pushAll(candles);
           lastGood = day;
           done++;

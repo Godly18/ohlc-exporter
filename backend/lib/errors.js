@@ -43,8 +43,10 @@ export const Errors = {
   invalidRequest: (msg = 'Invalid request.') => new AppError('INVALID_REQUEST', msg, 400),
   rangeTooLarge: (maxDays) =>
     new AppError('RANGE_TOO_LARGE', `The requested range is too large. Please request at most ${maxDays} days at a time.`, 400),
-  beforeMinDate: (year) =>
-    new AppError('DATE_TOO_EARLY', `Data is only available from ${year}-01-01 onwards.`, 400),
+  beforeMinDate: (year, label) =>
+    new AppError('DATE_TOO_EARLY', `Data ${label ? `for ${label} ` : ''}is only available from ${year}-01-01 onwards.`, 400),
+  noData: () =>
+    new AppError('NO_DATA', 'No data exists for this instrument in the selected date range. Please choose a later start date.', 404),
   notFound: () => new AppError('NOT_FOUND', 'Not found.', 404),
   tooManyRequests: () => new AppError('RATE_LIMITED', 'Too many requests. Please slow down.', 429),
 };
@@ -86,6 +88,16 @@ export class OandaError extends Error {
   constructor(message, { status = null, retryable = false } = {}) {
     super(message);
     this.name = 'OandaError';
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+/** A market-data provider (Binance, Twelve Data) failed or returned something we cannot trust. */
+export class SourceError extends Error {
+  constructor(message, { status = null, retryable = false } = {}) {
+    super(message);
+    this.name = 'SourceError';
     this.status = status;
     this.retryable = retryable;
   }

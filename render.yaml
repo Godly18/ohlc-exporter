@@ -26,6 +26,16 @@ services:
         sync: false
       - key: OANDA_ENVIRONMENT
         value: practice
+      # XAU/USD only (Twelve Data). Leave empty in the dashboard to hide XAU/USD.
+      - key: TWELVEDATA_API_KEY
+        sync: false
+      # Downloads are built and served by GitHub Actions (see README section 6).
+      - key: GH_EXPORT_TOKEN
+        sync: false
+      - key: GH_REPO
+        sync: false
+      - key: GH_REF
+        value: main
       - key: R2_ACCOUNT_ID
         sync: false
       - key: R2_ACCESS_KEY_ID

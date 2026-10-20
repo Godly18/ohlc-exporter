@@ -1,5 +1,6 @@
 // Test harness: real services + real HTTP server, with SQLite, in-memory R2 and fake OANDA.
 
+import { unzipSingle } from './unzip.js';
 import http from 'node:http';
 import { createApp } from '../../backend/app.js';
 import { createServices } from '../../backend/bootstrap.js';
@@ -7,6 +8,8 @@ import { loadConfig } from '../../backend/config/index.js';
 import { createSqliteDb, migrate } from '../../backend/database/index.js';
 import { createLogger } from '../../backend/lib/logger.js';
 import { createFakeOanda } from './fakeOanda.js';
+import { createFakeBinance, createFakeTwelve } from './fakeMarket.js';
+import { createFakeGithub } from './fakeGithub.js';
 import { createMemoryStorage } from './memoryStorage.js';
 
 export const TOKEN_SECRET = 'test-secret-0123456789-abcdefghijkl';
@@ -23,7 +26,7 @@ export function createClock(iso) {
   return c;
 }
 
-export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oanda: oandaOpts, withServer = true, db: existingDb, storage: existingStorage } = {}) {
+export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oanda: oandaOpts, withServer = true, db: existingDb, storage: existingStorage, useGithub = false, binanceOpts, twelveOpts } = {}) {
   const clock = createClock(now);
   const { config } = loadConfig({
     EXPORT_TOKEN_SECRET: TOKEN_SECRET,
@@ -37,6 +40,8 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
     RATE_LIMIT_API_PER_MIN: '100000',
     RATE_LIMIT_EXPORT_PER_MIN: '100000',
     NODE_ENV: 'test',
+    TWELVEDATA_API_KEY: 'test-twelve-key',
+    ...(useGithub ? { GH_EXPORT_TOKEN: 'gh-test-token', GH_REPO: 'octo/exporter', GH_POLL_MS: '5' } : {}),
     ...env,
   });
 
@@ -46,7 +51,10 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
   await migrate(db);
   const storage = existingStorage ?? createMemoryStorage(clock.now);
   const oanda = createFakeOanda(oandaOpts);
-  const services = createServices({ config, logger, clock: clock.now, db, storage, oanda, owner: 'test' });
+  const binance = createFakeBinance(binanceOpts);
+  const twelvedata = createFakeTwelve(twelveOpts);
+  const github = useGithub ? createFakeGithub({ storage }) : null;
+  const services = createServices({ config, logger, clock: clock.now, db, storage, oanda, binance, twelvedata, github, owner: 'test' });
 
   const state = { ready: true, shuttingDown: false, missing: [], startedAt: clock.now() };
   const ctx = { config, logger, state, clock: clock.now, services };
@@ -76,14 +84,16 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
         });
         const set = res.headers.get('set-cookie');
         if (set) cookie = set.split(';')[0];
-        const text = await res.text();
+        const raw = Buffer.from(await res.arrayBuffer());
+        const isZip = (res.headers.get('content-type') ?? '').includes('application/zip');
+        const text = isZip ? unzipSingle(raw).data.toString('utf8') : raw.toString("utf8"); // zip responses expose the CSV inside
         let json = null;
         try {
           json = JSON.parse(text);
         } catch {
           /* not JSON (CSV, HTML) */
         }
-        return { status: res.status, json, text, headers: res.headers };
+        return { status: res.status, json, text, body: raw, headers: res.headers };
       },
     };
   }
@@ -106,7 +116,7 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
     throw new Error('job did not finish');
   }
 
-  return { clock, config, logger, logLines, db, storage, oanda, services, ctx, state, handler, server, baseUrl, browser, close, waitForJob };
+  return { clock, config, logger, logLines, db, storage, oanda, binance, twelvedata, github, services, ctx, state, handler, server, baseUrl, browser, close, waitForJob };
 }
 
 export const ymd = (v) => v;

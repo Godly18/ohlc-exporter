@@ -1,7 +1,10 @@
-// Columnar in-memory candle storage using typed arrays (24 bytes/candle, no per-candle objects),
-// so a full year of M1 data (~370k candles) costs ~9 MB instead of tens of MB of JS objects.
+// Columnar in-memory candle storage using typed arrays (44 bytes/candle, no per-candle objects),
+// so a full year of M1 data (~525k candles) costs ~23 MB instead of tens of MB of JS objects.
 //
-// Prices are integers scaled by PRICE_SCALE (1e5). Timestamps are UTC seconds (uint32).
+// Prices and volumes are INTEGERS scaled per instrument (forex: price x1e5; crypto: price and volume
+// x1e8, see config/catalog.js). They are held in Float64 columns, which represent every integer up to
+// 2^53 exactly (enough for BTC/USDT at 8 decimals with orders of magnitude to spare). Timestamps are
+// UTC seconds (uint32).
 
 export const PRICE_SCALE = 100_000;
 export const MAX_SCALED_PRICE = 2_147_483_647;
@@ -11,11 +14,11 @@ export class CandleSet {
     this.length = 0;
     this._cap = Math.max(16, capacity);
     this.ts = new Uint32Array(this._cap);
-    this.o = new Int32Array(this._cap);
-    this.h = new Int32Array(this._cap);
-    this.l = new Int32Array(this._cap);
-    this.c = new Int32Array(this._cap);
-    this.v = new Uint32Array(this._cap);
+    this.o = new Float64Array(this._cap);
+    this.h = new Float64Array(this._cap);
+    this.l = new Float64Array(this._cap);
+    this.c = new Float64Array(this._cap);
+    this.v = new Float64Array(this._cap);
   }
 
   _grow(min) {
@@ -27,11 +30,11 @@ export class CandleSet {
       return next;
     };
     this.ts = widen(this.ts, Uint32Array);
-    this.o = widen(this.o, Int32Array);
-    this.h = widen(this.h, Int32Array);
-    this.l = widen(this.l, Int32Array);
-    this.c = widen(this.c, Int32Array);
-    this.v = widen(this.v, Uint32Array);
+    this.o = widen(this.o, Float64Array);
+    this.h = widen(this.h, Float64Array);
+    this.l = widen(this.l, Float64Array);
+    this.c = widen(this.c, Float64Array);
+    this.v = widen(this.v, Float64Array);
     this._cap = cap;
   }
 

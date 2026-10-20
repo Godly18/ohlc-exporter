@@ -1,10 +1,13 @@
 // Live-infrastructure smoke test. Run it ONCE with your real credentials (locally with a .env file,
 // or in the Render Shell):   npm run smoke
 //
-// It exercises exactly the three integrations the automated test-suite replaces with test doubles:
+// It exercises exactly the integrations the automated test-suite replaces with test doubles:
 //   1. PostgreSQL  - connect, create the schema, take and release the global lock
 //   2. Cloudflare R2 - put / head / copy / get / list / delete round trip (under exports/ only)
 //   3. OANDA       - download one real, completed UTC day of M1 candles
+//   4. Binance     - one day via the REST API, and one old month via the monthly archive (checksum verified)
+//   5. Twelve Data - one XAUUSD window (only when TWELVEDATA_API_KEY is set)
+//   6. GitHub      - the token can see the export workflow (only when export mode is "github")
 // It never prints secrets and never touches permanent datasets (oanda-data/).
 
 import { loadConfig, secretValues } from '../backend/config/index.js';
@@ -13,7 +16,10 @@ import { createLogger } from '../backend/lib/logger.js';
 import { addDays, isMarketClosedDay, utcDateOf } from '../backend/lib/time.js';
 import { newExportId } from '../backend/lib/tokens.js';
 import { createGlobalLock } from '../backend/services/jobs/lock.js';
+import { createBinanceClient } from '../backend/services/binance/client.js';
+import { createGithubClient } from '../backend/services/github/client.js';
 import { createOandaClient } from '../backend/services/oanda/client.js';
+import { createTwelveDataClient } from '../backend/services/twelvedata/client.js';
 import { exportKey } from '../backend/services/r2/keys.js';
 import { createR2Storage } from '../backend/services/r2/storage.js';
 
@@ -89,6 +95,48 @@ await step('OANDA: download one completed UTC day of M1 candles', async () => {
   if (incompleteCount > 0) throw new Error(`${incompleteCount} incomplete candles for ${day}`);
   return `${day}: ${candles.length} candles, ${config.oanda.environment} environment`;
 });
+
+await step('Binance: one recent day through the REST API (BTCUSDT)', async () => {
+  const binance = createBinanceClient({ binance: { ...config.binance, archiveEnabled: false }, logger });
+  const date = addDays(utcDateOf(Date.now()), -2);
+  const { candles, incompleteCount, via } = await binance.fetchDayCandles({ instrument: 'BTCUSDT', timeframe: 'M1', date });
+  if (candles.length < 1000) throw new Error(`only ${candles.length} candles for ${date}`);
+  if (incompleteCount > 0) throw new Error(`${incompleteCount} incomplete candles`);
+  return `${date}: ${candles.length} candles via ${via}`;
+});
+
+await step('Binance: one old month through the monthly archive (BTCUSDT 2024-01)', async () => {
+  const binance = createBinanceClient({ binance: config.binance, logger });
+  const { candles, via } = await binance.fetchDayCandles({ instrument: 'BTCUSDT', timeframe: 'M1', date: '2024-01-15' });
+  if (via !== 'archive') throw new Error(`expected the archive but got ${via}`);
+  if (candles.length < 1000) throw new Error(`only ${candles.length} candles`);
+  return `${candles.length} candles via archive (SHA-256 verified)`;
+});
+
+if (config.twelvedata.apiKey) {
+  await step('Twelve Data: XAUUSD window', async () => {
+    const td = createTwelveDataClient({ twelvedata: config.twelvedata, logger });
+    let day = addDays(utcDateOf(Date.now()), -4);
+    while (isMarketClosedDay(day)) day = addDays(day, -1);
+    const { candles } = await td.fetchDayCandles({ instrument: 'XAUUSD', timeframe: 'M1', date: day, lastDay: day });
+    if (candles.length === 0) throw new Error(`no candles for ${day} (check that your plan includes 1-minute XAU/USD history)`);
+    return `${day}: ${candles.length} candles`;
+  });
+} else {
+  console.log('SKIP  Twelve Data (TWELVEDATA_API_KEY not set: XAUUSD will not be offered)');
+}
+
+if (config.exportMode === 'github') {
+  await step('GitHub: token can see the export workflow', async () => {
+    const gh = createGithubClient({ github: config.github, logger });
+    const w = await gh.checkWorkflow();
+    if (w.state !== 'active') throw new Error(`workflow state is "${w.state}"`);
+    await gh.findRun('export smoke-test'); // proves the token may read runs
+    return `${config.github.repo} ${w.path}`;
+  });
+} else {
+  console.log('SKIP  GitHub (EXPORT_MODE is "server": downloads will be streamed by this server)');
+}
 
 await db?.close().catch(() => {});
 await storage?.close?.().catch(() => {});

@@ -11,7 +11,10 @@ import { loadConfig, secretValues } from './config/index.js';
 import { createDb, migrate } from './database/index.js';
 import { createLogger } from './lib/logger.js';
 import { sleep } from './lib/yield.js';
+import { createBinanceClient } from './services/binance/client.js';
+import { createGithubClient } from './services/github/client.js';
 import { createOandaClient } from './services/oanda/client.js';
+import { createTwelveDataClient } from './services/twelvedata/client.js';
 import { createR2Storage } from './services/r2/storage.js';
 import { createKeepAlive } from './workers/keepalive.js';
 
@@ -52,7 +55,11 @@ async function init() {
       await migrate(db);
       const storage = await createR2Storage(config.r2);
       const oanda = createOandaClient({ oanda: config.oanda, logger });
-      const services = createServices({ config, logger, clock, db, storage, oanda });
+      const binance = createBinanceClient({ binance: config.binance, logger, clock });
+      const twelvedata = config.twelvedata.apiKey ? createTwelveDataClient({ twelvedata: config.twelvedata, logger, clock }) : null;
+      const github = config.exportMode === 'github' ? createGithubClient({ github: config.github, logger }) : null;
+      logger.info('export mode', { mode: config.exportMode, xauusd: !!twelvedata });
+      const services = createServices({ config, logger, clock, db, storage, oanda, binance, twelvedata, github });
       await services.cleanup.startupRecovery(); // stale lock, orphaned jobs, expired exports
       ctx.services = services;
       services.cleanup.start();

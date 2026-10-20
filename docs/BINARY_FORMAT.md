@@ -1,4 +1,4 @@
-# Yearly dataset binary format (version 1)
+# Yearly dataset binary format (versions 1 and 2)
 
 One file per **instrument / timeframe / year**, stored in Cloudflare R2 at
 `oanda-data/<INSTRUMENT>/<TIMEFRAME>/<YEAR>.bin` (e.g. `oanda-data/EUR_USD/M1/2025.bin`).
@@ -61,3 +61,24 @@ A year becomes `COMPLETE` when `complete-through` reaches December 31.
 
 The previous `<year>.bin` is untouched until step 5, so a failure at any earlier point leaves the old
 known-good dataset in place. A corrupted file is copied to `oanda-data/_quarantine/...` and rebuilt.
+
+
+## Version 2 (crypto)
+
+Crypto prices need 8 decimals and exceed 32 bits (BTC/USDT x 1e8 is about 1.2e13), and volumes are fractional, so crypto pairs use
+version 2. The first 80 header bytes use the same offsets and fields as version 1 (with `version = 2`); differences:
+
+| Offset | Size | Type   | Field         | Notes |
+|-------:|-----:|--------|---------------|-------|
+| 6      | 2    | uint16 | header size   | `96` |
+| 34     | 2    | uint16 | record size   | `44` |
+| 36     | 4    | uint32 | price scale   | `100000000` (prices are integers = price x 1e8) |
+| 80     | 4    | uint32 | volume scale  | `100000000` (volumes are integers = amount x 1e8) |
+| 84     | 12   | bytes  | reserved      | zero |
+
+Record (44 bytes): `uint32 timestamp`, then `open, high, low, close, volume` as **float64** (little-endian) that hold **exact integers**
+(every integer up to 2^53 is exact in a float64). A decoded value that is not a safe integer makes the file corrupt.
+The body SHA-256 covers everything after the header (offset 96 onwards). A year of 1-minute crypto candles is about 23 MB.
+
+Which version a file uses is decided by the instrument catalog (`formatVersion`); the header's scales must match the catalog or the file is
+treated as corrupt and rebuilt. Version 1 files (forex, XAU/USD) are unchanged and remain valid.

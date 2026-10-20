@@ -1,8 +1,9 @@
 // API route handlers. Each returns after writing the response; thrown AppErrors become JSON errors.
 
 import { pipeline } from 'node:stream/promises';
-import { listInstruments, listTimeframes } from '../config/catalog.js';
+import { effectiveMinYear, listInstrumentEntries, listTimeframes, providerAvailable } from '../config/catalog.js';
 import { Errors } from '../lib/errors.js';
+import { parseGithubKey } from '../services/github/client.js';
 import { JOB_ID_RE } from '../lib/tokens.js';
 import { latestCompletedDay } from '../lib/time.js';
 import { readJsonBody, sendJson } from '../middleware/http.js';
@@ -24,7 +25,9 @@ export function createRoutes(ctx) {
       async handle(_req, res) {
         // Public, non-secret configuration only.
         sendJson(res, 200, {
-          instruments: listInstruments(),
+          instruments: listInstrumentEntries()
+            .filter((i) => providerAvailable(i, config))
+            .map((i) => ({ code: i.code, label: i.label, group: i.group, minYear: effectiveMinYear(i, config) })),
           timeframes: listTimeframes(),
           exportExpirationMinutes: config.exportExpirationMinutes,
           minDataYear: config.minDataYear,
@@ -77,11 +80,21 @@ export function createRoutes(ctx) {
       async handle(_req, res, { param }) {
         requireReady();
         const row = await svc().exportService.authorizeDownload(param); // enforces token + expiry
+        const gh = parseGithubKey(row.objectKey);
+        if (gh) {
+          // GitHub-hosted export: the token and the 5-minute expiry were verified above; now send the browser
+          // straight to GitHub's short-lived signed URL, so the file never passes through this server.
+          const url = await svc().github?.getArtifactDownloadUrl(gh.artifactId);
+          if (!url) throw Errors.expired();
+          res.writeHead(302, { Location: url, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+          res.end();
+          return;
+        }
         const obj = await svc().storage.getObjectStream(row.objectKey);
         if (!obj) throw Errors.expired();
-        const filename = `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.csv`;
+        const filename = `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.zip`;
         res.writeHead(200, {
-          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Type': 'application/zip',
           'Content-Disposition': `attachment; filename="${filename}"`,
           'Cache-Control': 'no-store',
           ...(obj.size != null ? { 'Content-Length': obj.size } : {}),

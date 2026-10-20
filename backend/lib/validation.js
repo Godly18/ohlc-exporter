@@ -1,6 +1,6 @@
 // Candle/dataset validation and user request validation.
 
-import { getInstrument, getTimeframe } from '../config/catalog.js';
+import { effectiveMinYear, getInstrument, getTimeframe, providerAvailable } from '../config/catalog.js';
 import { Errors } from './errors.js';
 import {
   addDays,
@@ -45,7 +45,13 @@ export async function validateCandleSet(set, { year, stepSeconds, completeThroug
 }
 
 /** Validate one day's parsed candles ({ts,o,h,l,c,v}). Returns null or a reason. */
-export function validateDayCandles(candles, date, stepSeconds) {
+const V1_LIMITS = Object.freeze({ maxPrice: 2_147_483_647, maxVolume: 0xffff_ffff });
+export const V2_LIMITS = Object.freeze({ maxPrice: Number.MAX_SAFE_INTEGER, maxVolume: Number.MAX_SAFE_INTEGER });
+
+/** Largest price/volume the instrument's dataset layout can hold. */
+export const limitsFor = (instrument) => (instrument?.formatVersion === 2 ? V2_LIMITS : V1_LIMITS);
+
+export function validateDayCandles(candles, date, stepSeconds, limits = V1_LIMITS) {
   const lo = dayStartSec(date);
   const hi = lo + 86_400;
   let prev = -1;
@@ -55,9 +61,11 @@ export function validateDayCandles(candles, date, stepSeconds) {
     if (k.ts % stepSeconds !== 0) return `candle not aligned to timeframe at index ${i}`;
     if (k.ts <= prev) return k.ts === prev ? `duplicate timestamp at index ${i}` : `out-of-order timestamp at index ${i}`;
     prev = k.ts;
-    if (k.o <= 0 || k.h <= 0 || k.l <= 0 || k.c <= 0) return `non-positive price at index ${i}`;
+    if (!(k.o > 0) || !(k.h > 0) || !(k.l > 0) || !(k.c > 0)) return `non-positive price at index ${i}`;
+    if (!Number.isSafeInteger(k.o) || !Number.isSafeInteger(k.h) || !Number.isSafeInteger(k.l) || !Number.isSafeInteger(k.c)) return `invalid price at index ${i}`;
+    if (k.o > limits.maxPrice || k.h > limits.maxPrice || k.l > limits.maxPrice || k.c > limits.maxPrice) return `price out of range at index ${i}`;
     if (k.h < k.o || k.h < k.c || k.h < k.l || k.l > k.o || k.l > k.c) return `invalid OHLC relationship at index ${i}`;
-    if (!Number.isInteger(k.v) || k.v < 0 || k.v > 0xffffffff) return `invalid volume at index ${i}`;
+    if (!Number.isSafeInteger(k.v) || k.v < 0 || k.v > limits.maxVolume) return `invalid volume at index ${i}`;
   }
   return null;
 }
@@ -71,7 +79,7 @@ export function validateExportRequest(body, nowMs, config) {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) throw Errors.invalidRequest();
 
   const instrument = getInstrument(body.instrument);
-  if (!instrument) throw Errors.invalidInstrument();
+  if (!instrument || !providerAvailable(instrument, config)) throw Errors.invalidInstrument();
   const timeframe = getTimeframe(body.timeframe);
   if (!timeframe) throw Errors.invalidTimeframe();
 
@@ -85,7 +93,8 @@ export function validateExportRequest(body, nowMs, config) {
   if (start > today || end > today) throw Errors.future();
   if (end === today) throw Errors.inProgress(); // current UTC day is never returned
 
-  if (yearOf(start) < config.minDataYear) throw Errors.beforeMinDate(config.minDataYear);
+  const minYear = effectiveMinYear(instrument, config);
+  if (yearOf(start) < minYear) throw Errors.beforeMinDate(minYear, instrument.label);
   if (daysInclusive(start, end) > config.maxExportDays) throw Errors.rangeTooLarge(config.maxExportDays);
 
   // The day that just ended is not available until it has settled and been fully verified.

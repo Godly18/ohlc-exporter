@@ -1,0 +1,73 @@
+# Builds one CSV export from the verified yearly datasets in Cloudflare R2 and publishes it as a workflow
+# artifact. The web app triggers this (workflow_dispatch), waits for it, and then redirects the user's
+# browser to the artifact download, so download traffic never goes through the Render server.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+# Use a READ-ONLY R2 API token here: this workflow only ever reads.
+
+name: Export CSV
+run-name: export ${{ inputs.export_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      export_id:
+        description: Export id (used to find this run)
+        required: true
+        type: string
+      instrument:
+        required: true
+        type: string
+      timeframe:
+        required: true
+        type: string
+      start_date:
+        required: true
+        type: string
+      end_date:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Build CSV from R2
+        env:
+          # Inputs are passed as environment variables, never interpolated into the script.
+          INSTRUMENT: ${{ inputs.instrument }}
+          TIMEFRAME: ${{ inputs.timeframe }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: node scripts/export-csv.js
+
+      # GitHub always delivers an artifact as a .zip: the CSV inside is compressed by GitHub.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: out/*.csv
+          retention-days: 1          # the app deletes it after 5 minutes; this is only the safety net
+          compression-level: 9
+          if-no-files-found: error

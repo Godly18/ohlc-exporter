@@ -6,12 +6,13 @@
 // Cleanup only ever deletes keys under exports/ (plus *.tmp staging); permanent *.bin data is never touched.
 
 import { MESSAGES } from '../lib/errors.js';
+import { parseGithubKey } from '../services/github/client.js';
 import { DATA_PREFIX, EXPORT_PREFIX, isExportKey } from '../services/r2/keys.js';
 
 const ORPHAN_GRACE_MS = 15 * 60_000;
 const ROW_RETENTION_MS = 60 * 60_000;
 
-export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, config, logger, clock }) {
+export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, github = null, config, logger, clock }) {
   let timer = null;
   let running = false;
   let ticks = 0;
@@ -23,7 +24,18 @@ export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, 
       let deleted = 0;
       for (const row of expired) {
         try {
-          if (row.objectKey && isExportKey(row.objectKey)) await storage.deleteObject(row.objectKey);
+          const gh = parseGithubKey(row.objectKey);
+          if (gh) {
+            // GitHub-hosted export: delete the artifact (the run too, to keep the Actions history tidy).
+            if (github) {
+              await github.deleteArtifact(gh.artifactId);
+              await github.deleteRun(gh.runId).catch(() => {});
+            } else {
+              logger.warn('GitHub is not configured; artifact will expire on its own retention', { jobId: row.jobId });
+            }
+          } else if (row.objectKey && isExportKey(row.objectKey)) {
+            await storage.deleteObject(row.objectKey);
+          }
           await exportsRepo.markExpired(row.jobId);
           deleted++;
           logger.info('expired export deleted', { jobId: row.jobId });

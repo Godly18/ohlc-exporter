@@ -27,6 +27,7 @@ let pollTimer = null;
 let tickTimer = null;
 let deadline = 0; // performance.now() value at which the download expires (display only)
 let polling = false;
+const state = { latest: '', maxDays: 0, expiry: 5 };
 
 async function api(path, options = {}) {
   const res = await fetch(path, { credentials: 'same-origin', ...options });
@@ -84,7 +85,7 @@ function renderJob(job) {
     STARTING: 'Starting…',
     DATASETS: job.progress?.label ?? 'Preparing historical data…',
     DOWNLOADING: job.progress?.label ?? 'Downloading missing days from OANDA…',
-    GENERATING: 'Generating your CSV…',
+    GENERATING: job.progress?.label ?? 'Generating your CSV…',
   };
 
   if (job.status === 'PROCESSING' || job.status === 'GENERATING') {
@@ -107,7 +108,7 @@ function renderJob(job) {
   setBusy(false);
 
   if (job.status === 'READY' && job.download) {
-    showStatus('ok', 'Your CSV is ready.', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
+    showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
     els.link.href = job.download.url;
     els.link.setAttribute('download', job.download.filename);
     els.meta.textContent = `${job.download.rows.toLocaleString()} rows · ${formatBytes(job.download.fileSize)}`;
@@ -196,8 +197,11 @@ els.form.addEventListener('submit', async (event) => {
 });
 
 // ---- Searchable instrument picker (type to filter, arrow keys / click to choose, list scrolls) ----
-const combo = { all: [], shown: [], active: -1 };
-const label = (code) => code.replace('_', '/');
+// Each instrument knows its group (Forex / Crypto / Metals) and the first year it can be requested.
+const combo = { all: [], byCode: new Map(), shown: [], active: -1 };
+const labelOf = (code) => combo.byCode.get(code)?.label ?? code;
+const GROUP_WORDS = { Forex: 'forex fx currency', Crypto: 'crypto cryptocurrency coin', Metals: 'metal metals gold xau' };
+const norm = (t) => t.toLowerCase().replace(/[\/_\s-]/g, '');
 
 function comboOpen(open) {
   els.list.classList.toggle('hidden', !open);
@@ -205,8 +209,8 @@ function comboOpen(open) {
 }
 
 function comboRender(showAll = false) {
-  const q = showAll ? '' : els.search.value.trim().toLowerCase().replace(/[\/_\s-]/g, '');
-  combo.shown = combo.all.filter((c) => c.replace('_', '').toLowerCase().includes(q));
+  const q = showAll ? '' : norm(els.search.value.trim());
+  combo.shown = combo.all.filter((i) => !q || norm(`${i.code} ${i.label} ${i.group} ${GROUP_WORDS[i.group] ?? ''}`).includes(q));
   els.list.textContent = '';
   if (!combo.shown.length) {
     const li = document.createElement('li');
@@ -216,15 +220,20 @@ function comboRender(showAll = false) {
     combo.active = -1;
     return;
   }
-  combo.shown.forEach((code, i) => {
+  combo.shown.forEach((inst, i) => {
     const li = document.createElement('li');
-    li.id = `inst-${code}`;
+    li.id = `inst-${inst.code}`;
     li.setAttribute('role', 'option');
-    li.setAttribute('aria-selected', String(code === els.instrument.value));
-    li.dataset.code = code;
-    li.textContent = label(code);
+    li.setAttribute('aria-selected', String(inst.code === els.instrument.value));
+    li.dataset.code = inst.code;
+    const name = document.createElement('span');
+    name.textContent = inst.label;
+    const tag = document.createElement('small');
+    tag.className = 'tag';
+    tag.textContent = inst.group;
+    li.append(name, tag);
     els.list.append(li);
-    if (code === els.instrument.value && combo.active < 0) combo.active = i;
+    if (inst.code === els.instrument.value && combo.active < 0) combo.active = i;
   });
   comboActivate(combo.active >= 0 && combo.active < combo.shown.length ? combo.active : 0);
 }
@@ -239,22 +248,36 @@ function comboActivate(i) {
   li.scrollIntoView({ block: 'nearest' });
 }
 
+/** The date pickers start at the instrument's first available year (crypto 2018, gold 2021, forex 2010). */
+function applyMinYear(inst) {
+  const min = `${inst.minYear}-01-01`;
+  els.start.min = els.end.min = min;
+  for (const input of [els.start, els.end]) {
+    if (input.value && input.value < min) input.value = min <= (input.max || min) ? min : '';
+  }
+  els.hint.classList.remove('error');
+  els.hint.textContent = `${inst.label}: data from ${inst.minYear} to ${state.latest} (UTC). Up to ${state.maxDays} days per request. Downloads stay valid for ${state.expiry} minutes.`;
+}
+
 function comboChoose(code) {
+  const inst = combo.byCode.get(code);
+  if (!inst) return;
   els.instrument.value = code;
-  els.search.value = label(code);
+  els.search.value = inst.label;
   comboOpen(false);
+  applyMinYear(inst);
 }
 
 function comboRestore() {
   // Leaving the box without a valid choice puts the last valid selection back.
-  els.search.value = els.instrument.value ? label(els.instrument.value) : '';
+  els.search.value = els.instrument.value ? labelOf(els.instrument.value) : '';
   comboOpen(false);
 }
 
 els.search.addEventListener('focus', () => {
   els.search.select();
   combo.active = -1;
-  comboRender(true); // show every pair first; typing then filters
+  comboRender(true); // show every instrument first; typing then filters
   comboOpen(true);
 });
 els.search.addEventListener('input', () => {
@@ -275,7 +298,7 @@ els.search.addEventListener('keydown', (e) => {
   } else if (e.key === 'Enter') {
     if (!els.list.classList.contains('hidden') && combo.shown[combo.active]) {
       e.preventDefault();
-      comboChoose(combo.shown[combo.active]);
+      comboChoose(combo.shown[combo.active].code);
     }
   } else if (e.key === 'Escape') {
     comboRestore();
@@ -293,12 +316,14 @@ els.list.addEventListener('mousedown', (e) => {
 async function init() {
   try {
     const cfg = await api('/api/config');
-    combo.all = [...cfg.instruments].sort();
-    comboChoose(combo.all.includes('EUR_USD') ? 'EUR_USD' : combo.all[0]);
+    combo.all = cfg.instruments;
+    combo.byCode = new Map(cfg.instruments.map((i) => [i.code, i]));
     for (const code of cfg.timeframes) els.timeframe.add(new Option(code, code));
-    els.start.min = els.end.min = `${cfg.minDataYear}-01-01`;
+    state.latest = cfg.latestSelectableDate;
+    state.maxDays = cfg.maxExportDays;
+    state.expiry = cfg.exportExpirationMinutes;
     els.start.max = els.end.max = cfg.latestSelectableDate; // yesterday (UTC): today is never available
-    els.hint.textContent = `Latest selectable date: ${cfg.latestSelectableDate} (UTC). Up to ${cfg.maxExportDays} days per request. Downloads stay valid for ${cfg.exportExpirationMinutes} minutes.`;
+    comboChoose(combo.byCode.has('EUR_USD') ? 'EUR_USD' : combo.all[0].code);
   } catch {
     els.hint.textContent = 'Could not load settings. Please refresh the page.';
     els.hint.classList.add('error');
