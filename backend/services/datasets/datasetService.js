@@ -1,6 +1,11 @@
 // Yearly dataset lifecycle: verify -> catch up missing COMPLETE UTC days -> stage -> validate ->
 // atomically promote. Callers must hold the global lock; this service never takes it itself.
 //
+// Gap tolerance: data providers routinely deliver series with holes (empty days, missing minutes), so a
+// day that comes back empty is simply stored as empty. The export reports the holes (lib/gaps.js) instead
+// of refusing. If retrieval fails part-way (outage, rate limit, invalid day), everything retrieved so far
+// is promoted to R2 and returned as a partial result; the next request resumes from where it stopped.
+//
 // Guarantees:
 //  * An incomplete / failed download can never become the permanent <year>.bin.
 //  * The previous known-good object stays untouched until the replacement is validated and
@@ -15,7 +20,6 @@ import {
   addDays,
   computeDayState,
   daysInclusive,
-  isMarketClosedDay,
   yearEndDate,
   yearStartDate,
 } from '../../lib/time.js';
@@ -145,12 +149,11 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
   }
 
   /**
-   * One complete, validated UTC day from the instrument's provider.
-   * Empty days: 'fx' calendars (forex, gold) may be empty only when the market is closed; 'always'
-   * calendars (crypto) may be empty only BEFORE the pair's first candle (not yet listed). Anything else
-   * means the source does not have the day yet, so the build stops rather than leaving a silent gap.
+   * One validated UTC day from the instrument's provider. An EMPTY day is accepted as-is (providers have
+   * holes: Sundays, exotic pairs, delisted/unlisted periods, outages on their side) and shows up in the
+   * missing-data report. Candles the provider still flags as incomplete, or invalid candles, are never stored.
    */
-  async function fetchValidatedDay(identity, day, signal, { lastDay, haveCandles }) {
+  async function fetchValidatedDay(identity, day, signal, { lastDay }) {
     const inst = getInstrument(identity.instrument);
     const { candles, incompleteCount } = await source.fetchDayCandles({
       instrument: identity.instrument,
@@ -161,9 +164,8 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
     });
     if (incompleteCount > 0) throw new DataNotReadyError(`source still reports incomplete candles for ${day}`, day);
     if (candles.length === 0) {
-      const legitimate = inst?.calendar === 'always' ? !haveCandles : isMarketClosedDay(day, config.extraClosedDates);
-      if (legitimate) return candles;
-      throw new DataNotReadyError(`source returned no candles for trading day ${day}`, day);
+      logger.debug?.('source returned no candles for day (stored as an empty day)', { id: `${identity.instrument}/${identity.timeframe}`, day });
+      return candles;
     }
     const reason = validateDayCandles(candles, day, stepOf(identity.timeframe), limitsFor(inst));
     if (reason) throw new DatasetBuildError(`invalid data for ${day}: ${reason}`);
@@ -205,7 +207,7 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
       }
 
       if (completeThrough && completeThrough >= target) {
-        return { set, completeThrough, reused: true };
+        return { set, completeThrough, reused: true, partial: null };
       }
 
       // ---- catch up: every missing complete day, in order -----------------------------------
@@ -225,7 +227,7 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
         for (; day <= target; day = addDays(day, 1)) {
           signal?.throwIfAborted();
           await repo.setDay(instrument, timeframe, day, 'DOWNLOADING');
-          const candles = await fetchValidatedDay(identity, day, signal, { lastDay: target, haveCandles: working.length > 0 });
+          const candles = await fetchValidatedDay(identity, day, signal, { lastDay: target });
           working.pushAll(candles);
           lastGood = day;
           done++;
@@ -249,17 +251,42 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
         if (!signal?.aborted && day <= target) {
           await repo.setDay(instrument, timeframe, day, 'FAILED', String(err?.message ?? err).slice(0, 200)).catch(() => {});
         }
-        logger.error('dataset update failed; previous known-good dataset preserved', {
-          id,
-          failedDay: day,
-          preservedThrough: lastPromoted,
-          error: err,
-        });
+        if (signal?.aborted || err?.name === 'AbortError') throw err;
+
+        // Partial retrieval: keep everything fetched before the failing day. Promote it to R2 (validated,
+        // atomic) so it is never fetched again, and hand it back so the export can still be delivered.
+        // The dataset only claims coverage through the last good day; a later request resumes after it.
+        let partialSet = working;
+        let partialThrough = lastGood;
+        if (lastGood && lastGood > (lastPromoted ?? '')) {
+          try {
+            await promote(identity, working, lastGood, signal);
+            lastPromoted = lastGood;
+          } catch (promoteErr) {
+            logger.error('could not save the partially retrieved data', { id, error: promoteErr });
+            partialSet = null;
+          }
+        }
+        if (partialSet && partialThrough) {
+          logger.warn('dataset update stopped early; data retrieved so far was saved', {
+            id,
+            failedDay: day,
+            savedThrough: partialThrough,
+            error: err,
+          });
+          return {
+            set: partialSet,
+            completeThrough: partialThrough,
+            reused: false,
+            partial: { stoppedBefore: day, error: err },
+          };
+        }
+        logger.error('dataset update failed; nothing could be retrieved', { id, failedDay: day, preservedThrough: lastPromoted, error: err });
         throw err;
       } finally {
         await repo.setActivity(instrument, timeframe, year, Activity.IDLE).catch(() => {});
       }
-      return { set: working, completeThrough: target, reused: false };
+      return { set: working, completeThrough: target, reused: false, partial: null };
     },
 
     /** Day availability state (DAY_NOT_COMPLETE / MISSING / DOWNLOADING / VERIFYING / AVAILABLE / FAILED). */

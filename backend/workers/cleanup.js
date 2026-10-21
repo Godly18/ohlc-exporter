@@ -7,7 +7,7 @@
 
 import { MESSAGES } from '../lib/errors.js';
 import { parseGithubKey } from '../services/github/client.js';
-import { DATA_PREFIX, EXPORT_PREFIX, isExportKey } from '../services/r2/keys.js';
+import { DATA_PREFIX, EXPORT_PREFIX, exportReportKey, isExportKey } from '../services/r2/keys.js';
 
 const ORPHAN_GRACE_MS = 15 * 60_000;
 const ROW_RETENTION_MS = 60 * 60_000;
@@ -36,6 +36,7 @@ export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, 
           } else if (row.objectKey && isExportKey(row.objectKey)) {
             await storage.deleteObject(row.objectKey);
           }
+          if (row.reportSize) await storage.deleteObject(exportReportKey(row.exportId));
           await exportsRepo.markExpired(row.jobId);
           deleted++;
           logger.info('expired export deleted', { jobId: row.jobId });

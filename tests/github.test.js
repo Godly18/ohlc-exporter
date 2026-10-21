@@ -61,8 +61,8 @@ describe('GitHub Actions offload', () => {
     );
     assert.match(inputs.export_id, /^[A-Za-z0-9_-]{16,}$/);
 
-    // nothing temporary was written to R2 by the server
-    assert.deepEqual(await h.storage.listObjects('exports/'), []);
+    // no ZIP/CSV was written to R2 by the server (only the tiny missing-data report, if any)
+    assert.deepEqual((await h.storage.listObjects('exports/')).filter((o) => !o.key.endsWith('_missing.txt')), []);
     const row = (await h.db.query('SELECT object_key, file_size FROM exports WHERE job_id = $1', [job.jobId])).rows[0];
     assert.match(row.object_key, /^gh:\d+:\d+$/);
     const [artifact] = [...h.github.artifacts.values()];
@@ -212,10 +212,12 @@ describe('export builder shared with the workflow script', () => {
     assert.ok(res.rows > 0);
     assert.equal(readFileSync(out, 'utf8').split('\n')[1].split(',')[0], '2026-09-02T00:00:00Z');
 
-    // not verified that far yet
-    await assert.rejects(writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2026-09-02', end: '2026-09-05', outFile: out }), /not verified through/);
-    // a year that was never built
-    await assert.rejects(writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2025-09-02', end: '2025-09-05', outFile: out }), /not in storage/);
+    // retrieved only through Sep 3: the CSV holds what exists and the notes say so (no error)
+    const part = await writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2026-09-02', end: '2026-09-05', outFile: out });
+    assert.equal(part.rows, res.rows);
+    assert.ok(part.notes.some((n) => /retrieved only through 2026-09-03/.test(n)));
+    // a year that was never built has nothing to write
+    await assert.rejects(writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2025-09-02', end: '2025-09-05', outFile: out }), /no candles/);
     // a tampered dataset is refused
     const key = 'oanda-data/EUR_USD/M1/2026.bin';
     const buf = Buffer.from(await h.storage.getObjectBuffer(key));

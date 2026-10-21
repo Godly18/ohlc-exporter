@@ -118,7 +118,7 @@ describe('crypto exports (Binance)', () => {
     assert.ok(h.binance.calls.every((x) => x.lastDay === '2026-09-02'));
   });
 
-  it('allows empty days only BEFORE a pair is listed, never as a gap after trading started', async () => {
+  it('accepts empty days before a pair is listed AND holes after trading started (reported, not refused)', async () => {
     h = await createHarness({ binanceOpts: { listedFrom: '2026-03-10' } });
     const c = h.browser();
     let s = await c.request('/api/export', { method: 'POST', body: req('LINKBTC', '2026-09-01', '2026-09-02') });
@@ -131,13 +131,12 @@ describe('crypto exports (Binance)', () => {
     h = await createHarness({ binanceOpts: { listedFrom: '2026-03-10' } });
     h.binance.emptyDays.add('2026-05-01'); // a whole day missing in the middle of trading
     const c2 = h.browser();
-    s = await c2.request('/api/export', { method: 'POST', body: req('LINKBTC', '2026-09-01', '2026-09-02') });
+    s = await c2.request('/api/export', { method: 'POST', body: req('LINKBTC', '2026-04-30', '2026-05-02') });
     job = await h.waitForJob(c2, s.json.jobId);
-    assert.equal(job.status, 'FAILED');
-    assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
     const stored = await h.storage.getObjectBuffer('oanda-data/LINKBTC/M1/2026.bin');
-    const through = stored ? parseHeader(stored).completeThrough : null;
-    assert.ok(through === null || through < '2026-05-01', `a dataset never claims coverage past the missing day (claims ${through})`);
+    assert.equal(parseHeader(stored).completeThrough, '2026-05-02', 'the hole is stored as an empty day and the year is saved');
+    assert.match((await c2.request(job.download.report.url)).text, /2026-05-01 \(Fri\)/);
   });
 
   it('tells the user when a pair has no data at all in the requested range', async () => {
@@ -150,12 +149,24 @@ describe('crypto exports (Binance)', () => {
     assert.match(job.error.message, /No data exists/);
   });
 
-  it('refuses a candle that is still open and keeps the previous dataset', async () => {
+  it('never stores a candle that is still open: delivers the days before it, or fails if there are none', async () => {
     h = await createHarness();
     h.binance.incompleteDays.add('2026-09-02');
     const c = h.browser();
-    const s = await c.request('/api/export', { method: 'POST', body: req('BNBBTC', '2026-09-01', '2026-09-02') });
-    const job = await h.waitForJob(c, s.json.jobId);
+    let s = await c.request('/api/export', { method: 'POST', body: req('BNBBTC', '2026-09-01', '2026-09-02') });
+    let job = await h.waitForJob(c, s.json.jobId);
+    assert.equal(job.status, 'READY');
+    assert.match((await c.request(job.download.report.url)).text, /stopped before 2026-09-02/);
+    const csv = (await c.request(job.download.url)).text;
+    assert.ok(!csv.includes('2026-09-02T'));
+
+    h.binance.incompleteDays.add('2026-09-01');
+    await h.close();
+    h = await createHarness();
+    h.binance.incompleteDays.add('2026-09-01');
+    const c3 = h.browser();
+    s = await c3.request('/api/export', { method: 'POST', body: req('ADABTC', '2026-09-01', '2026-09-02') });
+    job = await h.waitForJob(c3, s.json.jobId);
     assert.equal(job.status, 'FAILED');
     assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
   });
@@ -193,14 +204,14 @@ describe('gold exports (Twelve Data, XAUUSD only)', () => {
     assert.equal(parseHeader(await h.storage.getObjectBuffer('oanda-data/XAUUSD/M1/2026.bin')).version, 1);
   });
 
-  it('an empty weekday is NOT accepted for gold (no silent gaps)', async () => {
+  it('an empty weekday is accepted for gold and listed in the missing-data report', async () => {
     h = await createHarness();
     h.twelvedata.emptyDays.add('2026-09-09');
     const c = h.browser();
     const s = await c.request('/api/export', { method: 'POST', body: req('XAUUSD', '2026-09-08', '2026-09-10') });
     const job = await h.waitForJob(c, s.json.jobId);
-    assert.equal(job.status, 'FAILED');
-    assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
+    assert.match((await c.request(job.download.report.url)).text, /2026-09-09 \(Wed\)/);
   });
 
   it('forex still goes to OANDA only', async () => {

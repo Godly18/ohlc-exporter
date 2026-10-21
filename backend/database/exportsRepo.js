@@ -29,6 +29,7 @@ function mapExport(r) {
     objectKey: r.object_key,
     fileSize: num(r.file_size),
     rowCount: num(r.row_count),
+    reportSize: num(r.report_size),
     downloadTokenHash: r.download_token_hash,
     errorCode: r.error_code,
     errorMessage: r.error_message,
@@ -75,12 +76,12 @@ export function createExportsRepo(db, clock) {
     },
 
     /** Returns true only if the row was still in flight (so a job already failed by recovery cannot become READY). */
-    async markReady(jobId, { objectKey, fileSize, rowCount, tokenHash, createdAt, expiresAt }) {
+    async markReady(jobId, { objectKey, fileSize, rowCount, reportSize = null, tokenHash, createdAt, expiresAt }) {
       const res = await db.query(
         `UPDATE exports SET status = 'READY', stage = 'READY', object_key = $2, file_size = $3, row_count = $4,
-           download_token_hash = $5, created_at = $6, expires_at = $7, updated_at = $6
+           download_token_hash = $5, created_at = $6, expires_at = $7, updated_at = $6, report_size = $8
          WHERE job_id = $1 AND status IN ('PROCESSING', 'GENERATING')`,
-        [jobId, objectKey, fileSize, rowCount, tokenHash, createdAt, expiresAt],
+        [jobId, objectKey, fileSize, rowCount, tokenHash, createdAt, expiresAt, reportSize],
       );
       return res.rowCount === 1;
     },

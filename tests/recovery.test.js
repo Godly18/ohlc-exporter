@@ -106,7 +106,7 @@ describe('restart and export expiry', () => {
 
   it('restart BEFORE expiry (10:00 -> 10:03): the export is retained and still downloadable until 10:05', async () => {
     const { h2, job } = await readyThenRestart(3 * 60_000);
-    assert.equal(h2.storage.keys('exports/').length, 1);
+    assert.equal(h2.storage.keys('exports/').filter((k) => k.endsWith('.zip')).length, 1);
     assert.equal((await h2.browser().request(job.download.url)).status, 200);
     h2.clock.advance(2 * 60_000);
     assert.equal((await h2.browser().request(job.download.url)).status, 410);
@@ -157,13 +157,20 @@ describe('crash safety of generation and storage', () => {
     ]);
   });
 
-  it('a crash during an OANDA download leaves no permanent dataset, and the next run completes cleanly', async () => {
+  it('an outage during an OANDA download still delivers (and saves) what was retrieved; the next run completes it', async () => {
     const h = await make();
     h.oanda.failOn = (d) => (d === '2026-01-10' ? new Error('connection reset') : undefined);
     const c = h.browser();
     const res = await c.request('/api/export', { method: 'POST', body: body('2026-01-05', '2026-01-20') });
-    assert.equal((await h.waitForJob(c, res.json.jobId)).status, 'FAILED');
-    assert.deepEqual(h.storage.keys('oanda-data/'), []);
+    const job = await h.waitForJob(c, res.json.jobId);
+    assert.equal(job.status, 'READY');
+    assert.ok(job.download.report, 'the report says where retrieval stopped');
+    const report = (await c.request(job.download.report.url)).text;
+    assert.match(report, /stopped before 2026-01-10/);
+    assert.ok(!report.includes('connection reset'), 'raw provider errors are never shown to users');
+    const m = await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026);
+    assert.equal(m.lastCompleteDate, '2026-01-09');
+    assert.deepEqual(h.storage.keys('oanda-data/'), ['oanda-data/EUR_USD/M1/2026.bin']);
 
     h.oanda.failOn = null;
     const again = await c.request('/api/export', { method: 'POST', body: body('2026-01-05', '2026-01-20') });

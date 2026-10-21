@@ -51,4 +51,9 @@ export function exportKey(exportId) {
   return `${EXPORT_PREFIX}${exportId}.zip`;
 }
 
+export function exportReportKey(exportId) {
+  if (!EXPORT_ID_RE.test(exportId)) throw new Error('invalid export id');
+  return `${EXPORT_PREFIX}${exportId}_missing.txt`;
+}
+
 export const isExportKey = (key) => typeof key === 'string' && key.startsWith(EXPORT_PREFIX) && !key.includes('..');

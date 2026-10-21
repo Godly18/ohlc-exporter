@@ -51,8 +51,9 @@ const outFile = path.join(outDir, `${artifactName}.csv`);
 
 try {
   const storage = await createR2Storage(config.r2);
-  const { rows, bytes } = await writeExportCsv({ storage, ...request, outFile });
+  const { rows, bytes, notes } = await writeExportCsv({ storage, ...request, outFile });
   await storage.close?.();
+  for (const n of notes) console.warn(`note: ${n}`);
   console.log(`wrote ${rows} rows (${bytes} bytes) for ${request.instrument} ${request.timeframe} ${request.start}..${request.end}`);
 } catch (err) {
   fail(err?.message ?? String(err));

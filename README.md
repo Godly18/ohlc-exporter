@@ -89,9 +89,9 @@ Timestamp = candle open time, ISO-8601 UTC with `Z`. Lines end with `\n`.
   `.CHECKSUM` (SHA-256), and serves the month's days from it. If the month is not in the archive yet (the current month, and the first days
   after a month ends) or the checksum fails, it uses the REST API (`data-api.binance.vision/api/v3/klines`, 1000 candles per request, so 2 per day).
   Archive timestamps switched from milliseconds to **microseconds** in 2025; both are handled.
-* **Crypto trades 24/7**, so an empty day is only accepted *before the pair's first candle* (pair not listed yet, e.g. LINKBTC in 2018).
-  A missing day after trading started stops the build with "not fully processed and verified" instead of leaving a silent gap.
-  A range with no data at all is answered with "No data exists for this instrument in the selected date range".
+* **Holes in the data are normal and accepted.** Crypto pairs have days/minutes with no candle (not listed yet, exchange maintenance, no trades);
+  an empty day is simply stored as an empty day and reported in the missing-data report (section 2). A range with no candles at all is answered
+  with "No data exists for this instrument in the selected date range".
 * **Twelve Data free plan limits** (8 requests/minute, 800 credits/day) are respected: 3 days per request, ~8 s between requests.
   A first request for a whole past XAU/USD year is therefore about 100 requests (~13 minutes); a daily-credit error stops the job with a clear message.
   If `TWELVEDATA_API_KEY` is not set, XAUUSD is simply not offered.
@@ -109,16 +109,35 @@ Timestamp = candle open time, ISO-8601 UTC with `Z`. Lines end with `\n`.
   midnight UTC, and only becomes available after every candle was downloaded, flagged complete by OANDA, validated, and
   durably stored. Otherwise: *"...has not been fully processed and verified. Please retry later."*
 * Future dates, inverted ranges, malformed dates, unknown instruments/timeframes are rejected with clear messages.
-* **Current-year file** (`2026.bin`) records `complete_through`. After downtime it catches up **every** missing day
-  (e.g. stored through Sep 10, today Sep 14 means Sep 11, 12 and 13), and never claims coverage past a day that failed.
+* **Current-year file** (`2026.bin`) records `complete_through` = the last day that was *retrieved*. After downtime it catches up **every** missing day
+  (e.g. stored through Sep 10, today Sep 14 means Sep 11, 12 and 13), and never claims coverage past a day that was not retrieved.
 * **Year rollover:** when Dec 31 is verified the year becomes `COMPLETE`; the new year's file starts.
 
 Day states exposed by the code: `DAY_NOT_COMPLETE`, `DAY_MISSING` (ended, retrievable), `DAY_DOWNLOADING`, `DAY_VERIFYING`,
 `DAY_AVAILABLE`, `DAY_FAILED`. Dataset states: `MISSING`, `COMPLETE`, `COMPLETE_THROUGH_DAY`, `CORRUPTED`, `FAILED`.
 Export states: `PROCESSING`, `GENERATING`, `READY`, `FAILED`, `EXPIRED`.
 
-**Empty days:** an empty result is only accepted on days the market is closed (Saturdays, Dec 25, Jan 1, plus anything in
-`EXTRA_CLOSED_DATES`). An empty *trading* day is treated as "not ready" and fails the request rather than producing a CSV with a silent gap.
+**Incomplete data is delivered, not refused.** Providers routinely return series with holes, so:
+
+* **Empty days / missing minutes are accepted** and stored as they are (nothing is invented or filled in). This replaces the old rule that
+  failed a request on an empty weekday, and it fixes the Render log `source returned no candles for trading day 2025-08-10` (an empty
+  Sunday for EUR_TRY) and the "Data not available yet" error on crypto ranges with a missing day.
+* **Partial retrieval is saved.** If fetching stops part-way (outage, rate limit, an invalid or still-open candle), every day retrieved before that
+  is validated and promoted to R2 right away (atomic, same checks as always). The yearly file claims coverage only through the last retrieved day, and
+  the next request resumes from the next day. The export is still produced from what exists, with the rest listed as missing.
+  Only when **not a single day** could be retrieved does the request fail ("not fully processed and verified" for a provider error, "No data exists" for a range with no candles).
+* **Missing-data report.** Whenever the CSV has holes, a second file is offered next to the ZIP:
+  `<INSTRUMENT>_<TF>_<start>_<end>_missing_data.txt` (button "Download missing-data report (.txt)"). It lists
+  1. a summary (candles in the CSV, candles missing, counts),
+  2. an "INCOMPLETE RETRIEVAL" note when fetching stopped early (the reason is generic; raw provider errors and URLs are never shown),
+  3. **days with no data at all** (collapsed into date ranges, with weekday),
+  4. **missing timestamps inside days that have data** as `first -> last (N candles)` ranges of candle open times (UTC); capped at 20,000 ranges with the total still counted.
+
+  For forex and gold the regular weekly closure (Fri 21:00 to Sun 22:00 UTC, a fully empty Sunday, Dec 25, Jan 1 and `EXTRA_CLOSED_DATES`) is counted
+  in the summary but not listed, so a normal export is not buried in weekends. Crypto lists everything. When nothing is missing there is no report.
+  The report is a few KB of text stored in R2 under `exports/<id>_missing.txt`, served by the app (same token, same 5-minute server-side expiry) and deleted
+  together with the ZIP. The ZIP itself is still built on GitHub Actions and downloaded from GitHub.
+* Candles are **never** stored if the provider flags them as still open, or if they fail the OHLC/timestamp checks; a corrupted file is still quarantined and rebuilt.
 
 ## 3. `/health` on Render's free server
 
@@ -233,14 +252,15 @@ npm run smoke            # live check of Postgres, R2, OANDA, Binance, Twelve Da
 
 ## 9. What was tested, and what was NOT
 
-### Actually run (176 automated tests, all passing: `npm test`, about 10 s)
+### Actually run (189 automated tests, all passing: `npm test`, about 10 s)
 | File | Tests | Covers |
 |---|---:|---|
 | `calendar.test.js` | 20 | complete-day logic, no rolling 24h, UTC boundaries, settle window, current/future/inverted/malformed dates, no shortened ranges, cross-month/year, day states |
 | `binformat.test.js` | 13 | round trip, determinism, wrong instrument/timeframe/year, bit-flip, truncation, bad magic/version, duplicates, out-of-order, invalid OHLC, CSV format |
-| `datasets.test.js` | 19 | build/reuse, current-year `complete_through`, multi-day catch-up, failure preserves old file, checkpoints, atomic replacement, size-mismatch staging, incomplete/empty/invalid days, corruption rebuild, failed rebuild, hash mismatch, wrong identity, crash-window adoption, DB-loss recovery |
+| `datasets.test.js` | 22 | build/reuse, current-year `complete_through`, multi-day catch-up, failure preserves old file, checkpoints, atomic replacement, size-mismatch staging, partial retrieval saved and resumed, empty days accepted, incomplete/invalid days stop (partial), corruption rebuild, failed rebuild, hash mismatch, wrong identity, crash-window adoption, DB-loss recovery |
+| `gaps.test.js` | 7 | missing-data report: whole empty days, minute ranges, single candle, forex closure rules (weekend, empty Sunday, extra closed dates), retrieval note, list cap |
 | `lock.test.js` | 8 | first wins, 25 concurrent acquirers give 1 winner, no queue, release, stale recovery, heartbeat, lost-lock abort |
-| `exports.test.js` | 22 | CSV content/filtering/inclusive end, single- and cross-year loading, 5-minute expiry to the second, refresh recovery, multiple downloads, expired rejection with object present, cleanup, SYSTEM BUSY, failed-job release, maintenance vs user, catch-up, year transition |
+| `exports.test.js` | 25 | CSV content/filtering/inclusive end, single- and cross-year loading, 5-minute expiry to the second, refresh recovery, multiple downloads, expired rejection with object present, cleanup, SYSTEM BUSY, failed-job release, maintenance vs user, catch-up, year transition |
 | `recovery.test.js` | 11 | stale lock + orphan jobs, restart before/after expiry, crash during CSV write, abandoned staging, orphan sweep, crash during download, corrupted-data rebuild, row purge |
 | `security.test.js` | 14 | injection/traversal inputs, key safety, guessed/malformed tokens, other-session access, no secrets in pages/API/logs, headers/cookie, static traversal, HTTPS redirect, rate limiting |
 | `zip.test.js` | 5 | ZIP round trip + CRC, empty/30 MB input, readable by Python `zipfile` and `unzip -t`, source failure, consumer abort, end-to-end download is a valid single-entry `.zip` |
@@ -293,7 +313,7 @@ backend/workers/     cleanup + recovery, maintenance, keep-alive
 scripts/smoke.js     live-infrastructure check
 scripts/export-csv.js  runs inside GitHub Actions: R2 -> verified CSV
 .github/workflows/export-csv.yml   the export workflow
-tests/               176 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
+tests/               189 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
 docs/BINARY_FORMAT.md
 render.yaml  .env.example  package.json
 ```

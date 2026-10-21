@@ -20,6 +20,8 @@ const els = {
   download: $('download'),
   link: $('download-link'),
   meta: $('download-meta'),
+  report: $('report-link'),
+  reportNote: $('report-note'),
   countdown: $('countdown'),
 };
 
@@ -84,7 +86,7 @@ function renderJob(job) {
   const stages = {
     STARTING: 'Starting…',
     DATASETS: job.progress?.label ?? 'Preparing historical data…',
-    DOWNLOADING: job.progress?.label ?? 'Downloading missing days from OANDA…',
+    DOWNLOADING: job.progress?.label ?? 'Downloading missing days…',
     GENERATING: job.progress?.label ?? 'Generating your CSV…',
   };
 
@@ -111,6 +113,13 @@ function renderJob(job) {
     showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
     els.link.href = job.download.url;
     els.link.setAttribute('download', job.download.filename);
+    const hasReport = !!job.download.report;
+    els.report.classList.toggle('hidden', !hasReport);
+    els.reportNote.classList.toggle('hidden', !hasReport);
+    if (hasReport) {
+      els.report.href = job.download.report.url;
+      els.report.setAttribute('download', job.download.report.filename);
+    }
     els.meta.textContent = `${job.download.rows.toLocaleString()} rows · ${formatBytes(job.download.fileSize)}`;
     deadline = performance.now() + job.download.expiresInSeconds * 1000;
     els.download.classList.remove('hidden');
