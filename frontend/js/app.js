@@ -1,6 +1,8 @@
 // Frontend logic. All validation here is a convenience; the server re-validates everything and is
 // the only authority on date availability and on whether a download is still valid.
 
+import { attachDatePicker } from './datepicker.js';
+
 const $ = (id) => document.getElementById(id);
 const els = {
   form: $('export-form'),
@@ -90,7 +92,7 @@ function renderJob(job) {
 
   if (job.status === 'PROCESSING' || job.status === 'GENERATING') {
     hideDownload();
-    showStatus('warn', 'Working on it', stages[job.stage] ?? 'Processing…');
+    showStatus('warn', 'Working on it', `${stages[job.stage] ?? 'Processing…'} You can close this page: the server keeps retrieving the data and stores it, so you can request the same range again later.`);
     els.bar.classList.remove('hidden');
     if (job.progress?.total) {
       els.fill.classList.remove('indeterminate');
@@ -124,7 +126,8 @@ function renderJob(job) {
   if (job.status === 'EXPIRED') {
     showStatus('warn', 'Download expired', job.error?.message ?? 'This download has expired. Please generate the data again.');
   } else if (job.status === 'FAILED') {
-    showStatus('bad', 'Could not complete the request', job.error?.message ?? 'Please try again later.');
+    const kept = job.error?.code === 'DATA_NOT_AVAILABLE_YET' ? ' Whatever was retrieved so far is saved on the server and will be continued automatically.' : '';
+    showStatus('bad', 'Could not complete the request', `${job.error?.message ?? 'Please try again later.'}${kept}`);
   }
 }
 
@@ -264,44 +267,39 @@ function maxEndFor(start, years) {
   if (anniversary.getUTCMonth() !== m - 1) anniversary.setUTCDate(0);
   return ymd(new Date(anniversary.getTime() - 86_400_000));
 }
-/** Earliest start date that still allows `end`. */
-function minStartFor(end, years) {
-  const [y, m, d] = end.split('-').map(Number);
-  let s = ymd(new Date(Date.UTC(y - years, m - 1, d + 1)));
-  while (maxEndFor(s, years) < end) s = addDaysStr(s, 1);
-  return s;
-}
+/**
+ * Calendar limits. Start: first year of the instrument .. yesterday. End: from the chosen start, at most `maxYears`
+ * years later and never after yesterday. Days outside these limits are disabled in the picker (datepicker.js).
+ */
 function applyRangeLimits() {
-  const latest = state.latest;
   const lowest = state.minDate || '0000-01-01';
+  els.start.min = lowest;
+  els.start.max = state.latest;
   if (els.start.value) {
     const cap = maxEndFor(els.start.value, state.maxYears);
-    els.end.max = cap < latest ? cap : latest;
     els.end.min = els.start.value > lowest ? els.start.value : lowest;
+    els.end.max = cap < state.latest ? cap : state.latest;
   } else {
-    els.end.max = latest;
     els.end.min = lowest;
+    els.end.max = state.latest;
   }
-  if (els.end.value) {
-    const floor = minStartFor(els.end.value, state.maxYears);
-    els.start.min = floor > lowest ? floor : lowest;
-  } else {
-    els.start.min = lowest;
-  }
-  els.start.max = els.end.value && els.end.value < latest ? els.end.value : latest;
 }
 els.start.addEventListener('change', () => {
-  applyRangeLimits();
-  if (els.end.value && els.end.max && els.end.value > els.end.max) els.end.value = els.end.max;
+  if (els.start.value && els.end.value) {
+    const cap = maxEndFor(els.start.value, state.maxYears);
+    if (els.end.value < els.start.value) els.end.value = '';
+    else if (els.end.value > cap) els.end.value = cap < state.latest ? cap : state.latest;
+  }
   applyRangeLimits();
 });
 els.end.addEventListener('change', applyRangeLimits);
+attachDatePicker(els.start);
+attachDatePicker(els.end);
 
 /** The date pickers start at the instrument's first available year (crypto 2018, gold 2021, forex 2010). */
 function applyMinYear(inst) {
   const min = `${inst.minYear}-01-01`;
   state.minDate = min;
-  els.start.min = els.end.min = min;
   for (const input of [els.start, els.end]) {
     if (input.value && input.value < min) input.value = min <= (input.max || min) ? min : '';
   }

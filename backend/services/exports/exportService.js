@@ -85,6 +85,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       if (config.exportMode === 'github' && githubExport) {
         // Production: GitHub Actions reads the datasets from R2, builds and zips the CSV, and the user
         // downloads it from GitHub (the download link redirects there). Nothing is streamed by this server.
+        logger.info('handing the export to GitHub Actions', { jobId, instrument, timeframe, start, end });
         loaded.length = 0; // free the in-memory datasets while GitHub works
         segments.length = 0;
         const art = await githubExport.generate({

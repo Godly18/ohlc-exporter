@@ -110,7 +110,7 @@ describe('availability: never return partial or in-progress data', () => {
     assert.equal(res.json.error.message, 'Data not available yet. The requested date has not been fully processed and verified. Please retry later.');
   });
 
-  it('a day OANDA has not completed fails the whole request: nothing partial is delivered or stored, lock released', async () => {
+  it('a day OANDA has not completed fails the request ("retry later"), nothing partial is delivered, progress is saved', async () => {
     h = await createHarness();
     h.oanda.incompleteDays.add('2026-09-13');
     const c = h.browser();
@@ -121,9 +121,13 @@ describe('availability: never return partial or in-progress data', () => {
     assert.equal(job.download, null);
     assert.equal(exportsInStorage(h).length, 0);
     assert.equal(await h.services.lock.current(), null);
-    // Nothing from the unfinished retrieval was saved.
-    assert.ok(!['COMPLETE', 'COMPLETE_THROUGH_DAY'].includes((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026))?.status));
-    assert.deepEqual(h.storage.keys('oanda-data/'), []);
+    // Everything retrieved before the unfinished day is saved, and the next request continues from there.
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-12');
+    h.oanda.incompleteDays.clear();
+    h.oanda.calls.length = 0;
+    const again = await generate(c, '2026-09-01', '2026-09-13');
+    assert.equal(again.status, 'READY');
+    assert.deepEqual(h.oanda.calls.map((x) => x.date), ['2026-09-13']);
   });
 
   it('an empty weekday (provider hole) is delivered, and the ZIP holds the CSV plus a missing-data .txt', async () => {

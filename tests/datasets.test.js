@@ -76,54 +76,58 @@ describe('building and reusing yearly datasets', () => {
   });
 });
 
-describe('a retrieval that does not finish is never stored', () => {
-  it('a failure mid catch-up saves nothing: the old object stays byte-identical and the error is thrown', async () => {
+describe('a retrieval that stops part-way keeps what it got and is continued later', () => {
+  it('a failure mid catch-up saves the days retrieved before it; the next request continues from the next day', async () => {
     h = await createHarness({ withServer: false });
     await ensure(h, 2026, '2026-09-10');
-    const before = Buffer.from(raw(h, 2026));
-    const metaBefore = await meta(h, 2026);
 
     h.oanda.failOn = (d) => (d === '2026-09-12' ? new Error('network down') : undefined);
     await assert.rejects(ensure(h, 2026, '2026-09-13'), /network down/);
 
-    assert.ok(raw(h, 2026).equals(before), 'stored object must be byte-identical (09-11 was NOT saved)');
     const after = await meta(h, 2026);
-    assert.equal(after.lastCompleteDate, '2026-09-10');
-    assert.equal(after.sha256, metaBefore.sha256);
+    assert.equal(after.lastCompleteDate, '2026-09-11', 'day 09-11 was retrieved before the failure, so it is saved');
+    assert.equal(after.status, 'COMPLETE_THROUGH_DAY');
     assert.deepEqual(h.storage.keys().filter((k) => k.endsWith('.tmp')), [], 'no staging leftovers');
     assert.equal(await h.services.datasetService.getDayState('EUR_USD', 'M1', '2026-09-12'), DayState.FAILED);
-    assert.equal(await h.services.datasetService.getDayState('EUR_USD', 'M1', '2026-09-11'), DayState.MISSING);
+    assert.equal(await h.services.datasetService.getDayState('EUR_USD', 'M1', '2026-09-11'), DayState.AVAILABLE);
 
-    // a later, complete retrieval re-fetches from the last stored day and succeeds
     h.oanda.failOn = null;
     h.oanda.calls.length = 0;
     await ensure(h, 2026, '2026-09-13');
-    assert.deepEqual(callDates(h), ['2026-09-11', '2026-09-12', '2026-09-13']);
+    assert.deepEqual(callDates(h), ['2026-09-12', '2026-09-13'], 'only the missing days are fetched again');
   });
 
-  it('a failed first build leaves no permanent dataset at all (no checkpoints, no partial year)', async () => {
+  it('a failed first build keeps the days retrieved before the failure and resumes there', async () => {
     h = await createHarness({ withServer: false });
     h.oanda.failOn = (d) => (d === '2025-03-15' ? new Error('outage') : undefined);
     await assert.rejects(ensure(h, 2025, '2025-12-31'), /outage/);
-    assert.deepEqual(h.storage.keys('oanda-data/'), []);
-    assert.ok(![ 'COMPLETE', 'COMPLETE_THROUGH_DAY' ].includes((await meta(h, 2025))?.status), 'no dataset was recorded');
+    const m = await meta(h, 2025);
+    assert.equal(m.status, 'COMPLETE_THROUGH_DAY');
+    assert.equal(m.lastCompleteDate, '2025-03-14');
 
     h.oanda.failOn = null;
     h.oanda.calls.length = 0;
     await ensure(h, 2025, '2025-12-31');
-    assert.equal(callDates(h)[0], '2025-01-01', 'starts over: nothing partial was kept');
+    assert.equal(callDates(h)[0], '2025-03-15');
     assert.equal((await meta(h, 2025)).status, 'COMPLETE');
   });
 
-  it('an aborted job is still an abort', async () => {
+  it('when not a single day could be retrieved nothing is stored', async () => {
     h = await createHarness({ withServer: false });
-    const ac = new AbortController();
+    h.oanda.failOn = (d) => (d === '2025-01-01' ? new Error('boom') : undefined);
+    await assert.rejects(ensure(h, 2025, '2025-12-31'), /boom/);
+    assert.deepEqual(h.storage.keys('oanda-data/'), []);
+  });
+
+  it('checkpoints are written during long builds, so a crash loses at most the last days', async () => {
+    h = await createHarness({ withServer: false });
+    const abort = new AbortController();
     h.oanda.failOn = (d) => {
-      if (d === '2025-01-05') ac.abort();
+      if (d === '2025-02-20') abort.abort(); // a shutdown mid-build: no final save, the last checkpoint remains
       return undefined;
     };
-    await assert.rejects(ensure(h, 2025, '2025-12-31', { signal: ac.signal }));
-    assert.deepEqual(h.storage.keys('oanda-data/'), []);
+    await assert.rejects(ensure(h, 2025, '2025-12-31', { signal: abort.signal }));
+    assert.equal((await meta(h, 2025)).lastCompleteDate, '2025-01-30', 'checkpoint after 30 days');
   });
 
   it('atomic replacement: a failed promotion (copy) keeps the old object intact and removes the staging file', async () => {
@@ -153,7 +157,7 @@ describe('a retrieval that does not finish is never stored', () => {
     assert.ok(raw(h, 2026).equals(before));
   });
 
-  it('a day the source still reports as incomplete fails the retrieval (DataNotReady) and stores nothing', async () => {
+  it('a day the source still reports as incomplete fails the retrieval (DataNotReady); earlier days stay saved', async () => {
     h = await createHarness({ withServer: false });
     await ensure(h, 2026, '2026-09-10');
     h.oanda.incompleteDays.add('2026-09-11');

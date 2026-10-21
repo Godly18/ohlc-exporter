@@ -16,9 +16,12 @@ export function createMaintenanceWorker({ datasetsRepo, datasetService, runner, 
     const now = clock();
     const currentYear = yearOf(utcDateOf(now));
     const fetchable = latestFetchableDay(now, config.daySettleMinutes);
-    const existing = new Map((await datasetsRepo.list({ minYear: currentYear - 1 })).filter((d) => d.instrument === instrument && d.timeframe === timeframe).map((d) => [d.year, d]));
+    const existing = new Map((await datasetsRepo.list({ minYear: 0 })).filter((d) => d.instrument === instrument && d.timeframe === timeframe).map((d) => [d.year, d]));
 
-    for (const year of [currentYear - 1, currentYear]) {
+    // Last year and this year are kept current. Any OLDER year that was only partly retrieved (an interrupted
+    // request, e.g. a slow XAU/USD build) is also continued here, so users do not have to re-request it.
+    const unfinished = [...existing.values()].filter((d) => d.year < currentYear - 1 && d.status === DatasetStatus.COMPLETE_THROUGH_DAY).map((d) => d.year);
+    for (const year of [...new Set([...unfinished, currentYear - 1, currentYear])].sort((a, b) => a - b)) {
       const meta = existing.get(year);
       const prior = existing.get(year - 1);
       if (meta?.status === DatasetStatus.CORRUPTED) continue; // rebuilt on demand, not in the background

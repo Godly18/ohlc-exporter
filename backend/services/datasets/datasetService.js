@@ -3,10 +3,10 @@
 //
 // Gap tolerance: data providers routinely deliver series with holes (empty days, missing minutes), so a
 // day that comes back empty is simply stored as empty. The export reports the holes (lib/gaps.js) instead
-// of refusing. What is NEVER stored is a retrieval that did not finish: the whole requested range of a
-// year is fetched in memory and promoted once, at the end. If anything fails part-way (outage, rate limit,
-// invalid or still-open candle) nothing is saved, the previous known-good object stays as it was, and the
-// caller gets the error ("try again later").
+// of refusing. A retrieval that stops part-way (outage, rate limit, still-open candle, restart) keeps what it
+// got: periodic checkpoints and a final save on failure store the days retrieved so far (validated, atomic,
+// claiming coverage only through the last retrieved day). The caller still gets the error ("try again later"),
+// and the next request or the hourly maintenance cycle continues from the next day.
 //
 // Guarantees:
 //  * An incomplete / failed download can never become the permanent <year>.bin.
@@ -229,8 +229,24 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
       const working = set ?? new CandleSet(1 << 16);
       // Candles skipped as invalid: continue the list of a reused dataset, start fresh for a rebuild.
       const skipped = completeThrough ? await loadSkipped(storage, instrument, timeframe, year).catch(() => emptySkipped()) : emptySkipped();
-      const skippedBefore = skipped.size;
+      let savedSkipped = skipped.size;
       let done = 0;
+      let lastGood = completeThrough; // last day successfully retrieved in memory
+      let lastPromoted = completeThrough; // last day durably stored
+      let sinceCheckpoint = 0;
+
+      /** Validate + store everything retrieved so far, claiming coverage only through `through`. */
+      const save = async (through) => {
+        // The skip list goes first: if the promotion then fails, the extra entries are harmless (re-added identically later).
+        if (skipped.size > 0 && skipped.size !== savedSkipped) {
+          await saveSkipped(storage, instrument, timeframe, year, skipped);
+          savedSkipped = skipped.size;
+        } else if (!completeThrough && lastPromoted === null && skipped.size === 0) {
+          await storage.deleteObject(datasetSkippedKey(instrument, timeframe, year)).catch(() => {}); // stale list of a replaced dataset
+        }
+        await promote(identity, working, through, signal);
+        lastPromoted = through;
+      };
 
       await repo.setActivity(instrument, timeframe, year, Activity.DOWNLOADING);
       let day = from;
@@ -241,24 +257,40 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
           const res = await fetchValidatedDay(identity, day, signal, { lastDay: target });
           working.pushAll(res.candles);
           addSkipped(skipped, res.skipped);
+          lastGood = day;
           done++;
+          sinceCheckpoint++;
           onProgress?.({ stage: 'DOWNLOADING', current: done, total, label: `${year}: downloaded ${day}` });
+
+          // Periodic checkpoint: a fully validated, contiguous dataset promoted atomically. It only ever claims
+          // coverage through `day`, so a later failure (or a restart) loses at most the last few days.
+          if (sinceCheckpoint >= config.checkpointDays && day < target) {
+            await save(lastGood);
+            sinceCheckpoint = 0;
+          }
         }
-        // Only a fully retrieved range (with or without holes) is ever promoted. The skip list goes first: if the
-        // promotion then fails, the extra entries are harmless (they are re-added identically by the next run).
-        if (skipped.size > 0 && skipped.size !== skippedBefore) await saveSkipped(storage, instrument, timeframe, year, skipped);
-        else if (!completeThrough && skipped.size === 0) await storage.deleteObject(datasetSkippedKey(instrument, timeframe, year)).catch(() => {}); // stale list of a replaced dataset
-        await promote(identity, working, target, signal);
+        await save(target);
       } catch (err) {
-        // Nothing retrieved in this run is kept; only the day that actually failed is marked FAILED.
         await repo.clearDays(instrument, timeframe, from, day <= target ? day : target).catch(() => {});
         if (!signal?.aborted && day <= target) {
           await repo.setDay(instrument, timeframe, day, 'FAILED', String(err?.message ?? err).slice(0, 200)).catch(() => {});
         }
-        logger.error('dataset update failed; nothing saved, previous known-good dataset preserved', {
+        // Keep what was retrieved before the failure: it is stored (validated, atomic) so the next request or the
+        // hourly maintenance cycle CONTINUES from the next day instead of starting over. A shutdown/abort keeps
+        // whatever the last checkpoint stored.
+        let savedThrough = lastPromoted;
+        if (!signal?.aborted && err?.name !== 'AbortError' && lastGood && lastGood !== lastPromoted) {
+          try {
+            await save(lastGood);
+            savedThrough = lastGood;
+          } catch (saveErr) {
+            logger.error('could not save the partially retrieved data', { id, error: saveErr });
+          }
+        }
+        logger.error('dataset update stopped early; retrieved days are saved and will be continued later', {
           id,
           failedDay: day,
-          preservedThrough: completeThrough,
+          savedThrough,
           error: err,
         });
         throw err;

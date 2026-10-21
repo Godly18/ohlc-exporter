@@ -35,6 +35,7 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
     LOCK_LEASE_SECONDS: '90',
     MIN_DATA_YEAR: '2020',
     MAX_EXPORT_YEARS: '3',
+    CHECKPOINT_DAYS: '30',
     MAINTENANCE_ENABLED: 'false',
     RATE_LIMIT_API_PER_MIN: '100000',
     RATE_LIMIT_EXPORT_PER_MIN: '100000',

@@ -150,7 +150,7 @@ describe('crypto exports (Binance)', () => {
     assert.match(job.error.message, /No data exists/);
   });
 
-  it('never stores a candle that is still open: the request fails, nothing is saved, "try again later"', async () => {
+  it('a candle that is still open fails the request ("try again later"); the days before it are saved', async () => {
     h = await createHarness();
     h.binance.incompleteDays.add('2026-09-02');
     const c = h.browser();
@@ -159,7 +159,7 @@ describe('crypto exports (Binance)', () => {
     assert.equal(job.status, 'FAILED');
     assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
     assert.equal(job.download, null);
-    assert.deepEqual(h.storage.keys('oanda-data/'), [], 'nothing from the unfinished retrieval was kept');
+    assert.ok(h.storage.keys('oanda-data/').some((k) => k.endsWith('/2026.bin')), 'days before the open candle were saved');
   });
 
   it('a forex-format file under a crypto name is treated as corrupt and rebuilt', async () => {

@@ -157,7 +157,7 @@ describe('crash safety of generation and storage', () => {
     ]);
   });
 
-  it('an outage during an OANDA download fails the request and saves nothing; the next run completes cleanly', async () => {
+  it('an outage during an OANDA download fails the request, saves what was retrieved, and the next run completes it', async () => {
     const h = await make();
     h.oanda.failOn = (d) => (d === '2026-01-10' ? new Error('connection reset') : undefined);
     const c = h.browser();
@@ -165,12 +165,42 @@ describe('crash safety of generation and storage', () => {
     const job = await h.waitForJob(c, res.json.jobId);
     assert.equal(job.status, 'FAILED');
     assert.equal(job.download, null);
-    assert.deepEqual(h.storage.keys('oanda-data/'), []);
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-01-09');
 
     h.oanda.failOn = null;
+    h.oanda.calls.length = 0;
     const again = await c.request('/api/export', { method: 'POST', body: body('2026-01-05', '2026-01-20') });
     assert.equal((await h.waitForJob(c, again.json.jobId)).status, 'READY');
+    assert.equal(h.oanda.calls[0].date, '2026-01-10', 'resumes right after the saved day');
     assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-13');
+  });
+
+  it('the job keeps running on the server when the browser goes away; the data is then in R2 for a later request', async () => {
+    const h = await make();
+    let release;
+    h.oanda.gate = new Promise((r) => (release = r));
+    const gone = h.browser();
+    const res = await gone.request('/api/export', { method: 'POST', body: body('2026-09-01', '2026-09-03') });
+    assert.equal(res.status, 202); // ... and this browser never polls again
+    release();
+    await h.services.exportService.whenIdle();
+    assert.equal(await h.services.lock.current(), null);
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-13');
+    h.oanda.calls.length = 0;
+    const later = h.browser();
+    const again = await later.request('/api/export', { method: 'POST', body: body('2026-09-01', '2026-09-03') });
+    assert.equal((await h.waitForJob(later, again.json.jobId)).status, 'READY');
+    assert.equal(h.oanda.calls.length, 0, 'served from R2 without downloading anything');
+  });
+
+  it('hourly maintenance continues an interrupted OLDER year, not just the current one', async () => {
+    const h = await make();
+    h.oanda.failOn = (d) => (d === '2024-06-01' ? new Error('outage') : undefined);
+    await assert.rejects(h.services.datasetService.ensure({ instrument: 'EUR_USD', timeframe: 'M1', year: 2024, through: '2024-12-31' }));
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2024)).lastCompleteDate, '2024-05-31');
+    h.oanda.failOn = null;
+    await h.services.maintenance.runOnce();
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2024)).status, 'COMPLETE');
   });
 
   it('corrupted datasets are rebuilt transparently while serving a user request', async () => {

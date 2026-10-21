@@ -141,7 +141,7 @@ export function createDatasetsRepo(db, clock) {
     async listMaintenanceTargets(minYear) {
       const res = await db.query(
         `SELECT DISTINCT instrument, timeframe FROM datasets
-         WHERE year >= $1 AND status IN ('COMPLETE', 'COMPLETE_THROUGH_DAY') ORDER BY instrument, timeframe`,
+         WHERE (year >= $1 AND status IN ('COMPLETE', 'COMPLETE_THROUGH_DAY')) OR status = 'COMPLETE_THROUGH_DAY' ORDER BY instrument, timeframe`,
         [minYear],
       );
       return res.rows.map((r) => ({ instrument: r.instrument, timeframe: r.timeframe }));

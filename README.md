@@ -122,10 +122,12 @@ Export states: `PROCESSING`, `GENERATING`, `READY`, `FAILED`, `EXPIRED`.
 * **Empty days / missing minutes are accepted** and stored as they are (nothing is invented or filled in). This replaces the old rule that
   failed a request on an empty weekday, and it fixes the Render log `source returned no candles for trading day 2025-08-10` (an empty
   Sunday for EUR_TRY) and the "Data not available yet" error on crypto ranges with a missing day.
-* **Partial retrievals are never stored.** A year's requested range is fetched in memory and saved to R2 **once, at the end, only if every day
-  was retrieved** (days may be empty; that is a hole, not a failure). If anything fails part-way (outage, rate limit, an invalid or still-open
-  candle), nothing from that run is saved, no partial file is delivered, the previously stored object stays byte-identical, and the user sees
-  "Data not available yet ... Please retry later." The next request starts again from the last stored day.
+* **Partial retrievals are saved and continued.** If fetching stops part-way (outage, rate limit, a still-open candle, a restart), every day retrieved before
+  that is validated and stored in R2 (atomic, same checks as always; claiming coverage only through the last retrieved day), plus a checkpoint every
+  `CHECKPOINT_DAYS` (30) days while building. That request still ends with "Data not available yet ... Please retry later" (no partial file is delivered),
+  but nothing is lost: the next request, or the hourly maintenance cycle (which also finishes interrupted *older* years), continues from the next day.
+  If the user closes the page or loses the connection, the job keeps running on the server and the data ends up in R2; requesting the same range later
+  is then served from R2 without downloading anything.
 * **Missing-data report inside the ZIP.** When the CSV has holes, the ZIP contains two files:
   `<INSTRUMENT>_<TF>_<start>_<end>.csv` and `<INSTRUMENT>_<TF>_<start>_<end>_missing_data.txt`. The .txt lists
   1. a summary (candles in the CSV, candles missing, counts),
@@ -149,7 +151,7 @@ Export states: `PROCESSING`, `GENERATING`, `READY`, `FAILED`, `EXPIRED`.
   only what is missing is downloaded. (Binance uses its monthly archive files for months that have ended and the API for the rest; that is a source detail,
   the stored object is always the yearly file.)
 * **At most 2 years per request** (`MAX_EXPORT_YEARS`, default 2): the end date may be at most the day before the start date's 2nd anniversary
-  (2024-03-10 allows up to 2026-03-09). The calendars enforce it live (picking a start limits the end calendar and vice versa); the server checks it again.
+  (2024-03-10 allows up to 2026-03-09). The calendars enforce it live: the app uses its own date picker (`frontend/js/datepicker.js`) instead of the browser's, so the year list only holds valid years, clicking a year shows its months and clicking the same year again hides them, and days outside the allowed range are disabled. The server checks the limit again.
 
 ## 3. `/health` on Render's free server
 
@@ -191,7 +193,7 @@ health check at it. It was designed so it is **not interruptible by the applicat
   `<year>.bin`, then commit metadata. Any failure deletes the staging file and leaves the old known-good file untouched.
 * **Crash between copy and commit:** a `pending_sha256` marker written beforehand lets the next load adopt the (fully verified) new file.
 * **Database lost** (see the Render free-Postgres note below): fully verified objects in R2 are adopted and metadata is rebuilt with no re-download.
-* **No checkpoints / partial saves:** a build is saved only when the whole requested range was retrieved, so a restart mid-build simply starts that run over (the last good stored object is never touched).
+* **Checkpoints:** long builds store a validated checkpoint every `CHECKPOINT_DAYS` days, so a free-tier restart resumes instead of starting over.
 
 ## 6. Temporary exports: built and downloaded on GitHub Actions
 
@@ -263,7 +265,7 @@ npm run smoke            # live check of Postgres, R2, OANDA, Binance, Twelve Da
 
 ## 9. What was tested, and what was NOT
 
-### Actually run (192 automated tests, all passing: `npm test`, about 10 s)
+### Actually run (195 automated tests, all passing: `npm test`, about 10 s)
 | File | Tests | Covers |
 |---|---:|---|
 | `calendar.test.js` | 20 | complete-day logic, no rolling 24h, UTC boundaries, settle window, current/future/inverted/malformed dates, no shortened ranges, cross-month/year, day states |
@@ -302,7 +304,7 @@ Then request a small recent range once for a forex pair, a crypto pair and XAU/U
 * Validation of the request happens **before** taking the lock (cheap and stateless); everything else is inside it.
 * Past years are built **whole** (see the free-tier note) so completed-year files are immutable; the current year is built only as far as needed by a request, and by maintenance up to the latest verifiable day.
 * Exports are tied to an **anonymous cookie** (no accounts) for refresh recovery; the download link itself works as a bearer token for 5 minutes.
-* `DAY_SETTLE_MINUTES`, `MAX_EXPORT_YEARS`, `MIN_DATA_YEAR` are safety parameters of mine, all configurable.
+* `DAY_SETTLE_MINUTES`, `CHECKPOINT_DAYS`, `MAX_EXPORT_YEARS`, `MIN_DATA_YEAR` are safety parameters of mine, all configurable.
 * Forex prices are mid prices stored as integers x 1e5 (anything finer is rejected, not rounded). Crypto needs 8 decimals and values beyond 32 bits, so it uses format v2
   (integers x 1e8 held in float64, exact up to 2^53). Twelve Data prices beyond 5 decimals are rounded half-up (documented).
 * Past crypto years are built whole from the archive; the in-progress month always comes from the API.
@@ -324,7 +326,7 @@ backend/workers/     cleanup + recovery, maintenance, keep-alive
 scripts/smoke.js     live-infrastructure check
 scripts/export-csv.js  runs inside GitHub Actions: R2 -> verified CSV
 .github/workflows/export-csv.yml   the export workflow
-tests/               192 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
+tests/               195 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
 docs/BINARY_FORMAT.md
 render.yaml  .env.example  package.json
 ```
