@@ -233,6 +233,25 @@ describe('Twelve Data client (XAUUSD only)', () => {
     assert.equal(out.candles[0].o, 200_012_346);
   });
 
+  it('a weekend-only window answered with a real HTTP 400 "no data" is an empty window, not a failure (production bug)', async () => {
+    const calls = [];
+    const fetchImpl = async (url) => {
+      calls.push(url);
+      return res({ code: 400, status: 'error', message: '**symbol** No data is available on the specified dates. Try setting different start/end dates.' }, { status: 400 });
+    };
+    const client = createTwelveDataClient({ twelvedata: cfg(), logger, clock: () => NOW, fetchImpl, sleepFn: async () => {} });
+    // Sat 2023-12-30 .. Sun 2023-12-31 (the window the live job died on)
+    assert.deepEqual((await ask(client, '2023-12-30', '2023-12-31')).candles, []);
+    assert.deepEqual((await ask(client, '2023-12-31', '2023-12-31')).candles, []);
+    assert.equal(calls.length, 1, 'both weekend days came from one request, no retries');
+
+    // other 4xx answers still fail, with the provider's reason (and never the key)
+    const bad = createTwelveDataClient({ twelvedata: cfg(), logger, clock: () => NOW, fetchImpl: async () => res({ code: 400, status: 'error', message: 'interval is invalid' }, { status: 400 }), sleepFn: async () => {} });
+    await assert.rejects(ask(bad, '2026-09-01'), /Twelve Data error 400: interval is invalid/);
+    const denied = createTwelveDataClient({ twelvedata: cfg(), logger, clock: () => NOW, fetchImpl: async () => res({ code: 401, status: 'error', message: 'apikey is incorrect' }, { status: 401 }), sleepFn: async () => {} });
+    await assert.rejects(ask(denied, '2026-09-01'), /rejected the API key/);
+  });
+
   it('treats "no data" as an empty window, but real errors fail', async () => {
     let s = make(() => ({ code: 400, status: 'error', message: '**symbol** No data is available on the specified dates.' }));
     assert.deepEqual((await ask(s.client, '2026-09-05', '2026-09-13')).candles, []);

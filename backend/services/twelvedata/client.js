@@ -63,7 +63,7 @@ export function createTwelveDataClient({ twelvedata, logger, clock = Date.now, f
     for (let attempt = 0; ; attempt++) {
       let body;
       try {
-        body = await http.get(url, { signal });
+        body = await http.get(url, { signal, errorBodyOk: true });
       } catch (err) {
         if (signal?.aborted) throw err;
         const retryable = err instanceof SourceError ? err.retryable || (err.status ?? 0) >= 500 : true;
@@ -84,7 +84,7 @@ export function createTwelveDataClient({ twelvedata, logger, clock = Date.now, f
           continue;
         }
         if (body.code === 401 || body.code === 403) throw new SourceError('Twelve Data rejected the API key or plan.', { status: body.code });
-        throw new SourceError(`Twelve Data error ${body.code ?? ''}`.trim(), { status: body.code ?? null });
+        throw new SourceError(`Twelve Data error ${body.code ?? ''}: ${message.replace(/apikey=\S+/gi, '').slice(0, 120)}`.trim(), { status: body.code ?? null });
       }
       if (!Array.isArray(body?.values)) throw new SourceError('malformed Twelve Data response');
       return body.values;

@@ -16,10 +16,10 @@ export function createRequester({ name, delayMs, timeoutMs, maxRetries, logger, 
 
   /**
    * @param {string} url
-   * @param {{signal?: AbortSignal, headers?: object, as?: 'json'|'text'|'buffer', notFoundOk?: boolean, maxBytes?: number}} opts
+   * @param {{signal?: AbortSignal, headers?: object, as?: 'json'|'text'|'buffer', notFoundOk?: boolean, errorBodyOk?: boolean, maxBytes?: number}} opts
    * @returns parsed body, or null for a tolerated 404
    */
-  async function get(url, { signal, headers = {}, as = 'json', notFoundOk = false, maxBytes = 100 * 1024 * 1024 } = {}) {
+  async function get(url, { signal, headers = {}, as = 'json', notFoundOk = false, errorBodyOk = false, maxBytes = 100 * 1024 * 1024 } = {}) {
     for (let attempt = 0; ; attempt++) {
       await throttle(signal);
       let retryAfterMs = 0;
@@ -36,6 +36,17 @@ export function createRequester({ name, delayMs, timeoutMs, maxRetries, logger, 
           return buf;
         }
         if (res.status === 404 && notFoundOk) return null;
+        // Some APIs (Twelve Data) report "no data for these dates" and rate limits as a real HTTP 4xx WITH a JSON
+        // body that explains it. Hand that body to the caller instead of treating it as a transport failure.
+        if (errorBodyOk && as === 'json' && res.status >= 400 && res.status < 500) {
+          let parsed = null;
+          try {
+            parsed = await res.json();
+          } catch {
+            /* not JSON: fall through to the normal error */
+          }
+          if (parsed && typeof parsed === 'object') return parsed.code === undefined ? { ...parsed, code: res.status } : parsed;
+        }
 
         const retryable = res.status === 429 || res.status === 418 || res.status >= 500;
         const header = Number(res.headers?.get?.('retry-after'));
