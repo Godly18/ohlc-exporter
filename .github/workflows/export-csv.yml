@@ -61,13 +61,17 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          EXTRA_CLOSED_DATES: ${{ vars.EXTRA_CLOSED_DATES }}   # optional repository variable
         run: node scripts/export-csv.js
 
-      # GitHub always delivers an artifact as a .zip: the CSV inside is compressed by GitHub.
+      # GitHub always delivers an artifact as a .zip: the CSV (and the missing-data report, when there is one)
+      # are compressed into it by GitHub.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: out/*.csv
+          path: |
+            out/*.csv
+            out/*.txt
           retention-days: 1          # the app deletes it after 5 minutes; this is only the safety net
           compression-level: 9
           if-no-files-found: error

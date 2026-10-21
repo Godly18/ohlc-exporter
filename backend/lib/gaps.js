@@ -27,10 +27,10 @@ export const MAX_LISTED_RANGES = 20_000;
  * @param opts.stepSeconds  timeframe step (60 for M1)
  * @param opts.calendar  'fx' | 'always'
  * @param opts.extraClosedDates Set of YYYY-MM-DD that are expected to be empty (fx only)
- * @param opts.retrieval  null, or { stoppedBefore: 'YYYY-MM-DD', reason } when fetching stopped early
+ * @param opts.skipped  [{ ts, reason }] candles the provider delivered but that were invalid and therefore skipped
  * @returns {Promise<null | {text: string, missingCandles: number, rows: number}>} null when nothing is missing
  */
-export async function buildGapReport({ segments, start, end, stepSeconds: step, calendar, extraClosedDates = new Set(), instrumentLabel, instrument, timeframe, retrieval = null, nowMs = Date.now() }) {
+export async function buildGapReport({ segments, start, end, stepSeconds: step, calendar, extraClosedDates = new Set(), instrumentLabel, instrument, timeframe, skipped = [], nowMs = Date.now() }) {
   const startSec = dayStartSec(start);
   const endSec = dayStartSec(addDays(end, 1)); // exclusive
   const fx = calendar === 'fx';
@@ -48,9 +48,8 @@ export async function buildGapReport({ segments, start, end, stepSeconds: step, 
     return mmdd === '12-25' || mmdd === '01-01' || extraClosedDates.has(d);
   };
   /** Part of a UTC day (inclusive slot range) that is a normal market closure, or null. */
-  const cutSec = retrieval ? dayStartSec(retrieval.stoppedBefore) : Infinity; // days never retrieved are missing, not 'closed'
   const closureWindow = (daySec) => {
-    if (!fx || daySec >= cutSec) return null;
+    if (!fx) return null;
     const last = daySec + DAY - step;
     if (specialClosed(daySec) || isSaturday(dateOf(daySec))) return [daySec, last];
     const dow = new Date(daySec * 1000).getUTCDay();
@@ -85,7 +84,7 @@ export async function buildGapReport({ segments, start, end, stepSeconds: step, 
       if (wholeDay) {
         // A fully empty Sunday counts as a closure too: the market re-opens late that evening and many
         // pairs have no candles at all on some Sundays (e.g. exotic crosses).
-        if (win && ((win[0] === dayStart && win[1] === dayLast) || new Date(dayStart * 1000).getUTCDay() === 0 && dayStart < cutSec)) missingClosure += DAY / step;
+        if (win && ((win[0] === dayStart && win[1] === dayLast) || new Date(dayStart * 1000).getUTCDay() === 0)) missingClosure += DAY / step;
         else {
           emptyDays.push(dayStart);
           missingListed += DAY / step;
@@ -120,7 +119,8 @@ export async function buildGapReport({ segments, start, end, stepSeconds: step, 
   if (expected < endSec) addGap(expected, endSec - step);
 
   const missingTotal = missingListed; // already includes candles in ranges beyond the list cap
-  if (missingTotal === 0 && !retrieval) return null;
+  const skippedIn = skipped.filter((k) => k.ts === null || (k.ts >= startSec && k.ts < endSec)).sort((a, b) => (a.ts ?? Infinity) - (b.ts ?? Infinity));
+  if (missingTotal === 0 && skippedIn.length === 0) return null;
 
   // Collapse consecutive empty days.
   const dayRuns = [];
@@ -149,17 +149,9 @@ export async function buildGapReport({ segments, start, end, stepSeconds: step, 
   out.push(`Candles in the CSV                      : ${rows.toLocaleString('en-US')}`);
   out.push(`Candles missing (listed in this report) : ${missingTotal.toLocaleString('en-US')}`);
   out.push(`Days with no data at all                : ${emptyDays.length.toLocaleString('en-US')}`);
+  out.push(`Invalid candles skipped                 : ${skippedIn.length.toLocaleString('en-US')}`);
   out.push(`Gaps inside days that have data         : ${ranges.length.toLocaleString('en-US')}${rangeOverflow ? ' (list truncated)' : ''}`);
   if (fx) out.push(`Regular market-closure candles (not listed): ${missingClosure.toLocaleString('en-US')}  (Fri 21:00 - Sun 22:00 UTC, Dec 25, Jan 1)`);
-
-  if (retrieval) {
-    out.push('');
-    out.push('INCOMPLETE RETRIEVAL');
-    out.push('--------------------');
-    out.push(`Fetching from the data provider stopped before ${retrieval.stoppedBefore}${retrieval.reason ? ` (${retrieval.reason})` : ''}.`);
-    out.push('Everything retrieved up to that point is included. Days from there on were NOT retrieved and appear');
-    out.push('below as missing. Requesting the same range again later will retry them.');
-  }
 
   out.push('');
   out.push('DAYS WITH NO DATA AT ALL');
@@ -178,6 +170,13 @@ export async function buildGapReport({ segments, start, end, stepSeconds: step, 
     out.push(r.a === r.b ? `${iso(r.a)}  (1 candle)` : `${iso(r.a)}  ->  ${iso(r.b)}  (${r.n.toLocaleString('en-US')} candles)`);
   }
   if (rangeOverflow) out.push(`... and ${rangeOverflow.toLocaleString('en-US')} more missing candles in further ranges that are not listed (list limit ${MAX_LISTED_RANGES.toLocaleString('en-US')} ranges).`);
+  out.push('');
+  out.push('INVALID CANDLES SKIPPED');
+  out.push('-----------------------');
+  out.push('(delivered by the provider but unusable, so they are NOT in the CSV)');
+  if (!skippedIn.length) out.push('(none)');
+  for (const k of skippedIn.slice(0, MAX_LISTED_RANGES)) out.push(`${k.ts === null ? '(no usable timestamp)' : iso(k.ts)}  ${k.reason}`);
+  if (skippedIn.length > MAX_LISTED_RANGES) out.push(`... and ${(skippedIn.length - MAX_LISTED_RANGES).toLocaleString('en-US')} more not listed.`);
   out.push('');
 
   return { text: out.join('\n'), missingCandles: missingTotal, rows };

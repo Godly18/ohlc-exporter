@@ -76,65 +76,46 @@ describe('building and reusing yearly datasets', () => {
   });
 });
 
-describe('partial retrieval is saved, never lost, and never claims days that were not retrieved', () => {
-  it('a failure mid catch-up saves everything retrieved before it, returns it as partial, and resumes later', async () => {
+describe('a retrieval that does not finish is never stored', () => {
+  it('a failure mid catch-up saves nothing: the old object stays byte-identical and the error is thrown', async () => {
     h = await createHarness({ withServer: false });
     await ensure(h, 2026, '2026-09-10');
+    const before = Buffer.from(raw(h, 2026));
+    const metaBefore = await meta(h, 2026);
 
     h.oanda.failOn = (d) => (d === '2026-09-12' ? new Error('network down') : undefined);
-    const res = await ensure(h, 2026, '2026-09-13');
-    assert.equal(res.partial.stoppedBefore, '2026-09-12');
-    assert.match(String(res.partial.error.message), /network down/);
-    assert.equal(res.completeThrough, '2026-09-11');
+    await assert.rejects(ensure(h, 2026, '2026-09-13'), /network down/);
 
+    assert.ok(raw(h, 2026).equals(before), 'stored object must be byte-identical (09-11 was NOT saved)');
     const after = await meta(h, 2026);
-    assert.equal(after.lastCompleteDate, '2026-09-11', 'day 09-11 was retrieved, so it is saved; 09-12 is not claimed');
+    assert.equal(after.lastCompleteDate, '2026-09-10');
+    assert.equal(after.sha256, metaBefore.sha256);
     assert.deepEqual(h.storage.keys().filter((k) => k.endsWith('.tmp')), [], 'no staging leftovers');
     assert.equal(await h.services.datasetService.getDayState('EUR_USD', 'M1', '2026-09-12'), DayState.FAILED);
-    assert.equal(await h.services.datasetService.getDayState('EUR_USD', 'M1', '2026-09-11'), DayState.AVAILABLE);
+    assert.equal(await h.services.datasetService.getDayState('EUR_USD', 'M1', '2026-09-11'), DayState.MISSING);
 
-    // the saved object verifies on its own and the next request resumes right after it
+    // a later, complete retrieval re-fetches from the last stored day and succeeds
     h.oanda.failOn = null;
     h.oanda.calls.length = 0;
-    const next = await ensure(h, 2026, '2026-09-13');
-    assert.equal(next.partial, null);
-    assert.deepEqual(callDates(h), ['2026-09-12', '2026-09-13']);
+    await ensure(h, 2026, '2026-09-13');
+    assert.deepEqual(callDates(h), ['2026-09-11', '2026-09-12', '2026-09-13']);
   });
 
-  it('a failed first build still keeps the days that were retrieved before the failure', async () => {
-    h = await createHarness({ withServer: false });
-    h.oanda.failOn = (d) => (d === '2025-01-20' ? new Error('boom') : undefined);
-    const res = await ensure(h, 2025, '2025-12-31');
-    assert.equal(res.partial.stoppedBefore, '2025-01-20');
-    assert.equal(res.completeThrough, '2025-01-19');
-    assert.deepEqual(h.storage.keys('oanda-data/'), ['oanda-data/EUR_USD/M1/2025.bin']);
-    assert.equal((await meta(h, 2025)).status, 'COMPLETE_THROUGH_DAY');
-  });
-
-  it('when not a single day could be retrieved the failure is thrown and nothing is stored', async () => {
-    h = await createHarness({ withServer: false });
-    h.oanda.failOn = (d) => (d === '2025-01-01' ? new Error('boom') : undefined);
-    await assert.rejects(ensure(h, 2025, '2025-12-31'), /boom/);
-    assert.deepEqual(h.storage.keys('oanda-data/'), []);
-  });
-
-  it('checkpoints and the partial save only claim what was retrieved; the next run resumes after it', async () => {
+  it('a failed first build leaves no permanent dataset at all (no checkpoints, no partial year)', async () => {
     h = await createHarness({ withServer: false });
     h.oanda.failOn = (d) => (d === '2025-03-15' ? new Error('outage') : undefined);
-    const res = await ensure(h, 2025, '2025-12-31');
-    assert.equal(res.completeThrough, '2025-03-14');
-    const m = await meta(h, 2025);
-    assert.equal(m.status, 'COMPLETE_THROUGH_DAY');
-    assert.equal(m.lastCompleteDate, '2025-03-14');
+    await assert.rejects(ensure(h, 2025, '2025-12-31'), /outage/);
+    assert.deepEqual(h.storage.keys('oanda-data/'), []);
+    assert.ok(![ 'COMPLETE', 'COMPLETE_THROUGH_DAY' ].includes((await meta(h, 2025))?.status), 'no dataset was recorded');
 
     h.oanda.failOn = null;
     h.oanda.calls.length = 0;
     await ensure(h, 2025, '2025-12-31');
-    assert.equal(callDates(h)[0], '2025-03-15');
+    assert.equal(callDates(h)[0], '2025-01-01', 'starts over: nothing partial was kept');
     assert.equal((await meta(h, 2025)).status, 'COMPLETE');
   });
 
-  it('an aborted job is still an abort (not a partial result)', async () => {
+  it('an aborted job is still an abort', async () => {
     h = await createHarness({ withServer: false });
     const ac = new AbortController();
     h.oanda.failOn = (d) => {
@@ -142,6 +123,7 @@ describe('partial retrieval is saved, never lost, and never claims days that wer
       return undefined;
     };
     await assert.rejects(ensure(h, 2025, '2025-12-31', { signal: ac.signal }));
+    assert.deepEqual(h.storage.keys('oanda-data/'), []);
   });
 
   it('atomic replacement: a failed promotion (copy) keeps the old object intact and removes the staging file', async () => {
@@ -171,38 +153,38 @@ describe('partial retrieval is saved, never lost, and never claims days that wer
     assert.ok(raw(h, 2026).equals(before));
   });
 
-  it('stops (partial) at a day the source reports as still incomplete, keeping everything before it', async () => {
+  it('a day the source still reports as incomplete fails the retrieval (DataNotReady) and stores nothing', async () => {
     h = await createHarness({ withServer: false });
     await ensure(h, 2026, '2026-09-10');
     h.oanda.incompleteDays.add('2026-09-11');
-    const res = await ensure(h, 2026, '2026-09-13');
-    assert.equal(res.partial.stoppedBefore, '2026-09-11');
-    assert.ok(res.partial.error instanceof DataNotReadyError);
+    await assert.rejects(ensure(h, 2026, '2026-09-13'), DataNotReadyError);
     assert.equal((await meta(h, 2026)).lastCompleteDate, '2026-09-10');
   });
 
-  it('accepts an empty day anywhere (providers have holes): it is stored as an empty day, not an error', async () => {
+  it('accepts an empty day anywhere (providers have holes) when the whole range was retrieved', async () => {
     h = await createHarness({ withServer: false });
     await ensure(h, 2026, '2026-09-10');
     h.oanda.emptyDays.add('2026-09-11'); // a Friday with zero candles
     h.oanda.emptyDays.add('2026-09-13'); // a Sunday with zero candles (the real EUR_TRY case)
     const res = await ensure(h, 2026, '2026-09-13');
-    assert.equal(res.partial, null);
     assert.equal(res.completeThrough, '2026-09-13');
     assert.equal((await meta(h, 2026)).lastCompleteDate, '2026-09-13');
     const dayOf = (d) => Math.floor(Date.parse(`${d}T00:00:00Z`) / 1000);
-    const lo = res.set.lowerBound(dayOf('2026-09-11'));
-    const hi = res.set.lowerBound(dayOf('2026-09-12'));
-    assert.equal(hi - lo, 0, 'no candles for the empty Friday');
+    assert.equal(res.set.lowerBound(dayOf('2026-09-12')) - res.set.lowerBound(dayOf('2026-09-11')), 0, 'no candles for the empty Friday');
   });
 
-  it('stops (partial) at structurally invalid source data (bad OHLC) and never stores it', async () => {
+  it('invalid candles are SKIPPED (not fatal): the rest is kept and the skipped ones are listed in the sidecar', async () => {
     h = await createHarness({ withServer: false });
-    h.oanda.badOhlcDays.add('2026-09-11');
     await ensure(h, 2026, '2026-09-10');
+    h.oanda.badOhlcDays.add('2026-09-11'); // every candle of that day has high < low
     const res = await ensure(h, 2026, '2026-09-13');
-    assert.ok(res.partial.error instanceof DatasetBuildError);
-    assert.equal(res.completeThrough, '2026-09-10');
+    assert.equal(res.completeThrough, '2026-09-13');
+    const dayOf = (d) => Math.floor(Date.parse(`${d}T00:00:00Z`) / 1000);
+    assert.equal(res.set.lowerBound(dayOf('2026-09-12')) - res.set.lowerBound(dayOf('2026-09-11')), 0, 'invalid candles are not stored');
+    assert.ok(res.set.lowerBound(dayOf('2026-09-14')) > res.set.lowerBound(dayOf('2026-09-12')), 'later days are kept');
+    const skipped = [...(await h.services.datasetService.loadSkipped('EUR_USD', 'M1', 2026)).values()];
+    assert.ok(skipped.length > 0);
+    assert.ok(skipped.every((k) => k.reason === 'invalid OHLC relationship' && k.ts >= dayOf('2026-09-11') && k.ts < dayOf('2026-09-12')));
   });
 });
 

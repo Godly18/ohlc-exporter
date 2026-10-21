@@ -102,9 +102,6 @@ body {
 
 .download { margin-top: 16px; }
 .link-button { display: block; text-align: center; text-decoration: none; }
-.secondary { margin-top: 10px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border, #cfd6e0); background: transparent; color: inherit; font-weight: 600; }
-.secondary:hover { background: rgba(127, 127, 127, 0.1); }
-.secondary.hidden, .hint.hidden { display: none; }
 .meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 0.85rem; color: var(--muted); flex-wrap: wrap; }
 
 .foot { color: var(--muted); font-size: 0.8rem; }

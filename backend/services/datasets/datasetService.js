@@ -3,8 +3,10 @@
 //
 // Gap tolerance: data providers routinely deliver series with holes (empty days, missing minutes), so a
 // day that comes back empty is simply stored as empty. The export reports the holes (lib/gaps.js) instead
-// of refusing. If retrieval fails part-way (outage, rate limit, invalid day), everything retrieved so far
-// is promoted to R2 and returned as a partial result; the next request resumes from where it stopped.
+// of refusing. What is NEVER stored is a retrieval that did not finish: the whole requested range of a
+// year is fetched in memory and promoted once, at the end. If anything fails part-way (outage, rate limit,
+// invalid or still-open candle) nothing is saved, the previous known-good object stays as it was, and the
+// caller gets the error ("try again later").
 //
 // Guarantees:
 //  * An incomplete / failed download can never become the permanent <year>.bin.
@@ -23,10 +25,11 @@ import {
   yearEndDate,
   yearStartDate,
 } from '../../lib/time.js';
-import { limitsFor, validateCandleSet, validateDayCandles } from '../../lib/validation.js';
+import { limitsFor, sanitizeDayCandles, validateCandleSet } from '../../lib/validation.js';
+import { addSkipped, emptySkipped, loadSkipped, saveSkipped } from '../../lib/skipped.js';
 import { getInstrument, getTimeframe } from '../../config/catalog.js';
 import { Activity, DatasetStatus } from '../../database/datasetsRepo.js';
-import { datasetKey, datasetQuarantineKey, datasetTmpKey } from '../r2/keys.js';
+import { datasetKey, datasetQuarantineKey, datasetSkippedKey, datasetTmpKey } from '../r2/keys.js';
 
 export function createDatasetService({ repo, storage, source, config, logger, clock }) {
   const stepOf = (timeframe) => getTimeframe(timeframe).seconds;
@@ -149,9 +152,12 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
   }
 
   /**
-   * One validated UTC day from the instrument's provider. An EMPTY day is accepted as-is (providers have
-   * holes: Sundays, exotic pairs, delisted/unlisted periods, outages on their side) and shows up in the
-   * missing-data report. Candles the provider still flags as incomplete, or invalid candles, are never stored.
+   * One UTC day from the instrument's provider. Returns { candles, skipped }.
+   *  - An EMPTY day is accepted as-is (providers have holes) and shows up in the missing-data report.
+   *  - An INVALID candle (bad OHLC, non-positive price, duplicate, misaligned...) is skipped, not fatal; it is
+   *    listed in the report. The rest of the day is kept.
+   *  - A candle the provider still flags as open fails the retrieval (the day is not final yet; retry later),
+   *    because skipping it would leave a permanent hole in what is meant to be a complete day.
    */
   async function fetchValidatedDay(identity, day, signal, { lastDay }) {
     const inst = getInstrument(identity.instrument);
@@ -165,15 +171,20 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
     if (incompleteCount > 0) throw new DataNotReadyError(`source still reports incomplete candles for ${day}`, day);
     if (candles.length === 0) {
       logger.debug?.('source returned no candles for day (stored as an empty day)', { id: `${identity.instrument}/${identity.timeframe}`, day });
-      return candles;
+      return { candles, skipped: [] };
     }
-    const reason = validateDayCandles(candles, day, stepOf(identity.timeframe), limitsFor(inst));
-    if (reason) throw new DatasetBuildError(`invalid data for ${day}: ${reason}`);
-    return candles;
+    const res = sanitizeDayCandles(candles, day, stepOf(identity.timeframe), limitsFor(inst));
+    if (res.skipped.length) {
+      logger.warn('skipped invalid candles', { id: `${identity.instrument}/${identity.timeframe}`, day, count: res.skipped.length, first: res.skipped[0].reason });
+    }
+    return res;
   }
 
   return {
     verifyBuffer,
+
+    /** Candles skipped as invalid for a year (for the missing-data report). */
+    loadSkipped: (instrument, timeframe, year) => loadSkipped(storage, instrument, timeframe, year),
 
     /** Cheap metadata-only look (no object download). */
     peek: (instrument, timeframe, year) => repo.get(instrument, timeframe, year),
@@ -207,7 +218,7 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
       }
 
       if (completeThrough && completeThrough >= target) {
-        return { set, completeThrough, reused: true, partial: null };
+        return { set, completeThrough, reused: true };
       }
 
       // ---- catch up: every missing complete day, in order -----------------------------------
@@ -216,9 +227,9 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
       logger.info('missing complete days detected', { id, from, to: target, days: total, rebuild: !completeThrough });
 
       const working = set ?? new CandleSet(1 << 16);
-      let lastPromoted = completeThrough;
-      let lastGood = completeThrough;
-      let sinceCheckpoint = 0;
+      // Candles skipped as invalid: continue the list of a reused dataset, start fresh for a rebuild.
+      const skipped = completeThrough ? await loadSkipped(storage, instrument, timeframe, year).catch(() => emptySkipped()) : emptySkipped();
+      const skippedBefore = skipped.size;
       let done = 0;
 
       await repo.setActivity(instrument, timeframe, year, Activity.DOWNLOADING);
@@ -227,66 +238,34 @@ export function createDatasetService({ repo, storage, source, config, logger, cl
         for (; day <= target; day = addDays(day, 1)) {
           signal?.throwIfAborted();
           await repo.setDay(instrument, timeframe, day, 'DOWNLOADING');
-          const candles = await fetchValidatedDay(identity, day, signal, { lastDay: target });
-          working.pushAll(candles);
-          lastGood = day;
+          const res = await fetchValidatedDay(identity, day, signal, { lastDay: target });
+          working.pushAll(res.candles);
+          addSkipped(skipped, res.skipped);
           done++;
-          sinceCheckpoint++;
           onProgress?.({ stage: 'DOWNLOADING', current: done, total, label: `${year}: downloaded ${day}` });
-
-          // Periodic checkpoint: a fully validated, contiguous dataset promoted atomically. It only
-          // ever claims coverage through `day`, so a later failure cannot make it look complete.
-          if (sinceCheckpoint >= config.checkpointDays && day < target) {
-            await promote(identity, working, lastGood, signal);
-            lastPromoted = lastGood;
-            sinceCheckpoint = 0;
-          }
         }
+        // Only a fully retrieved range (with or without holes) is ever promoted. The skip list goes first: if the
+        // promotion then fails, the extra entries are harmless (they are re-added identically by the next run).
+        if (skipped.size > 0 && skipped.size !== skippedBefore) await saveSkipped(storage, instrument, timeframe, year, skipped);
+        else if (!completeThrough && skipped.size === 0) await storage.deleteObject(datasetSkippedKey(instrument, timeframe, year)).catch(() => {}); // stale list of a replaced dataset
         await promote(identity, working, target, signal);
-        lastPromoted = target;
       } catch (err) {
-        // Days downloaded in memory but never promoted are simply "missing" again; only the day that
-        // actually failed is marked FAILED.
+        // Nothing retrieved in this run is kept; only the day that actually failed is marked FAILED.
         await repo.clearDays(instrument, timeframe, from, day <= target ? day : target).catch(() => {});
         if (!signal?.aborted && day <= target) {
           await repo.setDay(instrument, timeframe, day, 'FAILED', String(err?.message ?? err).slice(0, 200)).catch(() => {});
         }
-        if (signal?.aborted || err?.name === 'AbortError') throw err;
-
-        // Partial retrieval: keep everything fetched before the failing day. Promote it to R2 (validated,
-        // atomic) so it is never fetched again, and hand it back so the export can still be delivered.
-        // The dataset only claims coverage through the last good day; a later request resumes after it.
-        let partialSet = working;
-        let partialThrough = lastGood;
-        if (lastGood && lastGood > (lastPromoted ?? '')) {
-          try {
-            await promote(identity, working, lastGood, signal);
-            lastPromoted = lastGood;
-          } catch (promoteErr) {
-            logger.error('could not save the partially retrieved data', { id, error: promoteErr });
-            partialSet = null;
-          }
-        }
-        if (partialSet && partialThrough) {
-          logger.warn('dataset update stopped early; data retrieved so far was saved', {
-            id,
-            failedDay: day,
-            savedThrough: partialThrough,
-            error: err,
-          });
-          return {
-            set: partialSet,
-            completeThrough: partialThrough,
-            reused: false,
-            partial: { stoppedBefore: day, error: err },
-          };
-        }
-        logger.error('dataset update failed; nothing could be retrieved', { id, failedDay: day, preservedThrough: lastPromoted, error: err });
+        logger.error('dataset update failed; nothing saved, previous known-good dataset preserved', {
+          id,
+          failedDay: day,
+          preservedThrough: completeThrough,
+          error: err,
+        });
         throw err;
       } finally {
         await repo.setActivity(instrument, timeframe, year, Activity.IDLE).catch(() => {});
       }
-      return { set: working, completeThrough: target, reused: false, partial: null };
+      return { set: working, completeThrough: target, reused: false };
     },
 
     /** Day availability state (DAY_NOT_COMPLETE / MISSING / DOWNLOADING / VERIFYING / AVAILABLE / FAILED). */

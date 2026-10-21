@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { writeExportCsv } from '../../backend/lib/exportFile.js';
-import { zipSingleFile } from '../../backend/lib/zip.js';
+import { zipFiles } from '../../backend/lib/zip.js';
 
 export function createFakeGithub({ storage }) {
   let nextRun = 1000;
@@ -35,20 +35,22 @@ export function createFakeGithub({ storage }) {
           if (fake.mode === 'fail') throw new Error('simulated failure');
           const dir = mkdtempSync(path.join(tmpdir(), 'gh-'));
           const outFile = path.join(dir, `${inputs.artifact_name}.csv`);
-          await writeExportCsv({
+          const reportFile = path.join(dir, `${inputs.artifact_name}_missing_data.txt`);
+          const written = await writeExportCsv({
             storage,
             instrument: inputs.instrument,
             timeframe: inputs.timeframe,
             start: inputs.start_date,
             end: inputs.end_date,
             outFile,
+            reportFile,
+            extraClosedDates: new Set(),
           });
           const csv = readFileSync(outFile);
           const parts = [];
-          async function* one() {
-            yield csv;
-          }
-          for await (const p of zipSingleFile(`${inputs.artifact_name}.csv`, one(), Date.now())) parts.push(p);
+          const entries = [{ name: `${inputs.artifact_name}.csv`, source: [csv] }];
+          if (written.reported) entries.push({ name: `${inputs.artifact_name}_missing_data.txt`, source: [readFileSync(reportFile)] });
+          for await (const p of zipFiles(entries, Date.now())) parts.push(p);
           const id = nextArtifact++;
           fake.artifacts.set(id, { id, name: inputs.artifact_name, zip: Buffer.concat(parts), runId: run.id });
           run.conclusion = 'success';

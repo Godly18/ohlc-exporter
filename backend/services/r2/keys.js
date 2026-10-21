@@ -37,6 +37,12 @@ export function datasetKey(instrument, timeframe, year) {
   return `${DATA_PREFIX}${instrument}/${timeframe}/${year}.bin`;
 }
 
+/** Small JSON next to a yearly dataset listing candles that were skipped as invalid (for the missing-data report). */
+export function datasetSkippedKey(instrument, timeframe, year) {
+  checkIdentity(instrument, timeframe, year);
+  return `${DATA_PREFIX}${instrument}/${timeframe}/${year}.skipped.json`;
+}
+
 export function datasetTmpKey(instrument, timeframe, year) {
   return `${datasetKey(instrument, timeframe, year)}.tmp`;
 }
@@ -49,11 +55,6 @@ export function datasetQuarantineKey(instrument, timeframe, year, stampMs) {
 export function exportKey(exportId) {
   if (!EXPORT_ID_RE.test(exportId)) throw new Error('invalid export id');
   return `${EXPORT_PREFIX}${exportId}.zip`;
-}
-
-export function exportReportKey(exportId) {
-  if (!EXPORT_ID_RE.test(exportId)) throw new Error('invalid export id');
-  return `${EXPORT_PREFIX}${exportId}_missing.txt`;
 }
 
 export const isExportKey = (key) => typeof key === 'string' && key.startsWith(EXPORT_PREFIX) && !key.includes('..');

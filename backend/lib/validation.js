@@ -4,9 +4,9 @@ import { effectiveMinYear, getInstrument, getTimeframe, providerAvailable } from
 import { Errors } from './errors.js';
 import {
   addDays,
+  maxEndForYears,
   dayStartMs,
   dayStartSec,
-  daysInclusive,
   isValidDateString,
   latestFetchableDay,
   utcDateOf,
@@ -51,23 +51,47 @@ export const V2_LIMITS = Object.freeze({ maxPrice: Number.MAX_SAFE_INTEGER, maxV
 /** Largest price/volume the instrument's dataset layout can hold. */
 export const limitsFor = (instrument) => (instrument?.formatVersion === 2 ? V2_LIMITS : V1_LIMITS);
 
-export function validateDayCandles(candles, date, stepSeconds, limits = V1_LIMITS) {
+/** Why ONE candle is unusable, or null. `lo`/`hi` bound the requested day (seconds). */
+function candleProblem(k, lo, hi, stepSeconds, limits) {
+  if (!Number.isInteger(k.ts) || k.ts < lo || k.ts >= hi) return 'timestamp outside the requested day';
+  if (k.ts % stepSeconds !== 0) return 'timestamp not aligned to the timeframe';
+  if (!(k.o > 0) || !(k.h > 0) || !(k.l > 0) || !(k.c > 0)) return 'non-positive price';
+  if (!Number.isSafeInteger(k.o) || !Number.isSafeInteger(k.h) || !Number.isSafeInteger(k.l) || !Number.isSafeInteger(k.c)) return 'invalid price';
+  if (k.o > limits.maxPrice || k.h > limits.maxPrice || k.l > limits.maxPrice || k.c > limits.maxPrice) return 'price out of range';
+  if (k.h < k.o || k.h < k.c || k.h < k.l || k.l > k.o || k.l > k.c) return 'invalid OHLC relationship';
+  if (!Number.isSafeInteger(k.v) || k.v < 0 || k.v > limits.maxVolume) return 'invalid volume';
+  return null;
+}
+
+/**
+ * Keep the usable candles of one day and SKIP (not fail on) the unusable ones.
+ * Returns { candles, skipped }: candles are sorted, de-duplicated (first one wins) and individually valid;
+ * skipped is [{ ts, reason }] for the report (ts is null when the source gave no usable timestamp).
+ */
+export function sanitizeDayCandles(candles, date, stepSeconds, limits = V1_LIMITS) {
   const lo = dayStartSec(date);
   const hi = lo + 86_400;
-  let prev = -1;
-  for (let i = 0; i < candles.length; i++) {
-    const k = candles[i];
-    if (!Number.isInteger(k.ts) || k.ts < lo || k.ts >= hi) return `candle outside requested day at index ${i}`;
-    if (k.ts % stepSeconds !== 0) return `candle not aligned to timeframe at index ${i}`;
-    if (k.ts <= prev) return k.ts === prev ? `duplicate timestamp at index ${i}` : `out-of-order timestamp at index ${i}`;
-    prev = k.ts;
-    if (!(k.o > 0) || !(k.h > 0) || !(k.l > 0) || !(k.c > 0)) return `non-positive price at index ${i}`;
-    if (!Number.isSafeInteger(k.o) || !Number.isSafeInteger(k.h) || !Number.isSafeInteger(k.l) || !Number.isSafeInteger(k.c)) return `invalid price at index ${i}`;
-    if (k.o > limits.maxPrice || k.h > limits.maxPrice || k.l > limits.maxPrice || k.c > limits.maxPrice) return `price out of range at index ${i}`;
-    if (k.h < k.o || k.h < k.c || k.h < k.l || k.l > k.o || k.l > k.c) return `invalid OHLC relationship at index ${i}`;
-    if (!Number.isSafeInteger(k.v) || k.v < 0 || k.v > limits.maxVolume) return `invalid volume at index ${i}`;
+  const skipped = [];
+  const good = [];
+  for (const k of candles) {
+    const reason = candleProblem(k, lo, hi, stepSeconds, limits);
+    if (reason) skipped.push({ ts: Number.isInteger(k.ts) ? k.ts : null, reason });
+    else good.push(k);
   }
-  return null;
+  good.sort((a, b) => a.ts - b.ts);
+  const out = [];
+  for (const k of good) {
+    if (out.length && out[out.length - 1].ts === k.ts) skipped.push({ ts: k.ts, reason: 'duplicate timestamp' });
+    else out.push(k);
+  }
+  return { candles: out, skipped };
+}
+
+/** Strict all-or-nothing check (kept for tests and tooling): returns null or the first reason. */
+export function validateDayCandles(candles, date, stepSeconds, limits = V1_LIMITS) {
+  const { candles: good, skipped } = sanitizeDayCandles(candles, date, stepSeconds, limits);
+  if (skipped.length) return skipped[0].reason;
+  return good.length === candles.length ? null : 'unordered candles';
 }
 
 /**
@@ -95,7 +119,7 @@ export function validateExportRequest(body, nowMs, config) {
 
   const minYear = effectiveMinYear(instrument, config);
   if (yearOf(start) < minYear) throw Errors.beforeMinDate(minYear, instrument.label);
-  if (daysInclusive(start, end) > config.maxExportDays) throw Errors.rangeTooLarge(config.maxExportDays);
+  if (end > maxEndForYears(start, config.maxExportYears)) throw Errors.rangeTooLarge(config.maxExportYears);
 
   // The day that just ended is not available until it has settled and been fully verified.
   if (end > latestFetchableDay(nowMs, config.daySettleMinutes)) throw Errors.notVerified();

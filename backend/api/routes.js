@@ -4,9 +4,8 @@ import { pipeline } from 'node:stream/promises';
 import { effectiveMinYear, listInstrumentEntries, listTimeframes, providerAvailable } from '../config/catalog.js';
 import { Errors } from '../lib/errors.js';
 import { parseGithubKey } from '../services/github/client.js';
-import { exportReportKey } from '../services/r2/keys.js';
 import { JOB_ID_RE } from '../lib/tokens.js';
-import { latestCompletedDay } from '../lib/time.js';
+import { latestFetchableDay } from '../lib/time.js';
 import { readJsonBody, sendJson } from '../middleware/http.js';
 
 export function createRoutes(ctx) {
@@ -32,8 +31,9 @@ export function createRoutes(ctx) {
           timeframes: listTimeframes(),
           exportExpirationMinutes: config.exportExpirationMinutes,
           minDataYear: config.minDataYear,
-          maxExportDays: config.maxExportDays,
-          latestSelectableDate: latestCompletedDay(ctx.clock()),
+          maxExportYears: config.maxExportYears,
+          // The newest day the server will accept: yesterday (UTC), once it has settled. Today is never offered.
+          latestSelectableDate: latestFetchableDay(ctx.clock(), config.daySettleMinutes),
           serverTime: new Date(ctx.clock()).toISOString(),
         });
       },
@@ -80,22 +80,7 @@ export function createRoutes(ctx) {
       prefix: '/api/export/download/',
       async handle(_req, res, { param }) {
         requireReady();
-        const wantsReport = param.endsWith('/report');
-        const row = await svc().exportService.authorizeDownload(wantsReport ? param.slice(0, -'/report'.length) : param); // enforces token + expiry
-        if (wantsReport) {
-          // The missing-data report is a few KB of text, served directly (same token, same 5-minute expiry).
-          if (!row.reportSize) throw Errors.notFound();
-          const text = await svc().storage.getObjectBuffer(exportReportKey(row.exportId));
-          if (!text) throw Errors.expired();
-          res.writeHead(200, {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Content-Disposition': `attachment; filename="${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}_missing_data.txt"`,
-            'Cache-Control': 'no-store',
-            'Content-Length': text.length,
-          });
-          res.end(text);
-          return;
-        }
+        const row = await svc().exportService.authorizeDownload(param); // enforces token + expiry
         const gh = parseGithubKey(row.objectKey);
         if (gh) {
           // GitHub-hosted export: the token and the 5-minute expiry were verified above; now send the browser

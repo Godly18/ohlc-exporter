@@ -101,7 +101,7 @@ describe('crypto exports (Binance)', () => {
     assert.equal(header.version, 2);
     assert.equal(header.priceScale, 1e8);
     assert.equal(header.volumeScale, 1e8);
-    assert.equal(header.completeThrough, '2026-09-03');
+    assert.equal(header.completeThrough, '2026-09-13', 'the whole year so far (through yesterday) is stored, not just the requested days');
 
     // second request: nothing new to download
     const before = h.binance.calls.length;
@@ -115,7 +115,7 @@ describe('crypto exports (Binance)', () => {
     const c = h.browser();
     const s = await c.request('/api/export', { method: 'POST', body: req('ETHUSDT', '2026-09-01', '2026-09-02') });
     await h.waitForJob(c, s.json.jobId);
-    assert.ok(h.binance.calls.every((x) => x.lastDay === '2026-09-02'));
+    assert.ok(h.binance.calls.every((x) => x.lastDay === '2026-09-13'));
   });
 
   it('accepts empty days before a pair is listed AND holes after trading started (reported, not refused)', async () => {
@@ -135,8 +135,9 @@ describe('crypto exports (Binance)', () => {
     job = await h.waitForJob(c2, s.json.jobId);
     assert.equal(job.status, 'READY', JSON.stringify(job.error));
     const stored = await h.storage.getObjectBuffer('oanda-data/LINKBTC/M1/2026.bin');
-    assert.equal(parseHeader(stored).completeThrough, '2026-05-02', 'the hole is stored as an empty day and the year is saved');
-    assert.match((await c2.request(job.download.report.url)).text, /2026-05-01 \(Fri\)/);
+    assert.equal(parseHeader(stored).completeThrough, '2026-09-13', 'the hole is stored as an empty day and the year is saved');
+    const rep2 = (await c2.request(job.download.url)).files.find((f) => f.name.endsWith('_missing_data.txt'));
+    assert.match(rep2.data.toString(), /2026-05-01 \(Fri\)/);
   });
 
   it('tells the user when a pair has no data at all in the requested range', async () => {
@@ -149,26 +150,16 @@ describe('crypto exports (Binance)', () => {
     assert.match(job.error.message, /No data exists/);
   });
 
-  it('never stores a candle that is still open: delivers the days before it, or fails if there are none', async () => {
+  it('never stores a candle that is still open: the request fails, nothing is saved, "try again later"', async () => {
     h = await createHarness();
     h.binance.incompleteDays.add('2026-09-02');
     const c = h.browser();
-    let s = await c.request('/api/export', { method: 'POST', body: req('BNBBTC', '2026-09-01', '2026-09-02') });
-    let job = await h.waitForJob(c, s.json.jobId);
-    assert.equal(job.status, 'READY');
-    assert.match((await c.request(job.download.report.url)).text, /stopped before 2026-09-02/);
-    const csv = (await c.request(job.download.url)).text;
-    assert.ok(!csv.includes('2026-09-02T'));
-
-    h.binance.incompleteDays.add('2026-09-01');
-    await h.close();
-    h = await createHarness();
-    h.binance.incompleteDays.add('2026-09-01');
-    const c3 = h.browser();
-    s = await c3.request('/api/export', { method: 'POST', body: req('ADABTC', '2026-09-01', '2026-09-02') });
-    job = await h.waitForJob(c3, s.json.jobId);
+    const s = await c.request('/api/export', { method: 'POST', body: req('BNBBTC', '2026-09-01', '2026-09-02') });
+    const job = await h.waitForJob(c, s.json.jobId);
     assert.equal(job.status, 'FAILED');
     assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
+    assert.equal(job.download, null);
+    assert.deepEqual(h.storage.keys('oanda-data/'), [], 'nothing from the unfinished retrieval was kept');
   });
 
   it('a forex-format file under a crypto name is treated as corrupt and rebuilt', async () => {
@@ -211,7 +202,8 @@ describe('gold exports (Twelve Data, XAUUSD only)', () => {
     const s = await c.request('/api/export', { method: 'POST', body: req('XAUUSD', '2026-09-08', '2026-09-10') });
     const job = await h.waitForJob(c, s.json.jobId);
     assert.equal(job.status, 'READY', JSON.stringify(job.error));
-    assert.match((await c.request(job.download.report.url)).text, /2026-09-09 \(Wed\)/);
+    const rep = (await c.request(job.download.url)).files.find((f) => f.name.endsWith('_missing_data.txt'));
+    assert.match(rep.data.toString(), /2026-09-09 \(Wed\)/);
   });
 
   it('forex still goes to OANDA only', async () => {

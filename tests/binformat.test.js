@@ -103,7 +103,7 @@ describe('dataset validation', () => {
   it('validates a day batch', () => {
     const good = [{ ts: T0, o: 1, h: 2, l: 1, c: 2, v: 1 }];
     assert.equal(validateDayCandles(good, '2025-03-03', 60), null);
-    assert.match(validateDayCandles(good, '2025-03-04', 60), /outside requested day/);
+    assert.match(validateDayCandles(good, '2025-03-04', 60), /outside the requested day/);
     assert.match(validateDayCandles([{ ...good[0], h: 0 }], '2025-03-03', 60), /non-positive|OHLC/);
   });
 });

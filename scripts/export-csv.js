@@ -3,7 +3,9 @@
 // as a workflow artifact, which the app's download link redirects to (no download bytes through the server).
 //
 // Inputs come from environment variables (never interpolated into shell code):
-//   INSTRUMENT, TIMEFRAME, START_DATE, END_DATE, ARTIFACT_NAME, R2_* (read-only token recommended)
+//   INSTRUMENT, TIMEFRAME, START_DATE, END_DATE, ARTIFACT_NAME, R2_* (read-only token recommended),
+//   optional EXTRA_CLOSED_DATES
+// Output: out/<name>.csv and, when candles are missing, out/<name>_missing_data.txt (both go into the artifact ZIP).
 
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -24,7 +26,7 @@ const { config } = loadConfig({
   EXPORT_TOKEN_SECRET: 'x'.repeat(16),
   TWELVEDATA_API_KEY: 'unused', // only so XAUUSD passes the "provider configured" check; this script never calls Twelve Data
   MIN_DATA_YEAR: '1970',
-  MAX_EXPORT_DAYS: '100000',
+  MAX_EXPORT_YEARS: '10',
   DAY_SETTLE_MINUTES: '0',
 });
 for (const key of ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME']) {
@@ -48,12 +50,14 @@ try {
 const outDir = path.resolve('out');
 mkdirSync(outDir, { recursive: true });
 const outFile = path.join(outDir, `${artifactName}.csv`);
+const reportFile = path.join(outDir, `${artifactName}_missing_data.txt`); // only written when data is missing
 
 try {
   const storage = await createR2Storage(config.r2);
-  const { rows, bytes, notes } = await writeExportCsv({ storage, ...request, outFile });
+  const { rows, bytes, notes, reported } = await writeExportCsv({ storage, ...request, outFile, reportFile, extraClosedDates: config.extraClosedDates });
   await storage.close?.();
   for (const n of notes) console.warn(`note: ${n}`);
+  if (reported) console.log('wrote the missing-data report next to the CSV');
   console.log(`wrote ${rows} rows (${bytes} bytes) for ${request.instrument} ${request.timeframe} ${request.start}..${request.end}`);
 } catch (err) {
   fail(err?.message ?? String(err));

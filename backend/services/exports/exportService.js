@@ -4,7 +4,7 @@
 
 import { csvChunks } from '../../lib/csv.js';
 import { csvOptionsFor } from '../../lib/exportFile.js';
-import { zipSingleFile } from '../../lib/zip.js';
+import { zipFiles } from '../../lib/zip.js';
 import { getInstrument, getTimeframe } from '../../config/catalog.js';
 import { buildGapReport } from '../../lib/gaps.js';
 import {
@@ -15,19 +15,13 @@ import {
   MESSAGES,
 } from '../../lib/errors.js';
 import { deriveDownloadToken, newExportId, newJobId, sha256Hex, TOKEN_RE } from '../../lib/tokens.js';
-import { addDays, dayStartSec, utcDateOf, yearEndDate, yearOf, yearStartDate, yearsInRange } from '../../lib/time.js';
+import { addDays, dayStartSec, latestFetchableDay, utcDateOf, yearEndDate, yearOf, yearStartDate, yearsInRange } from '../../lib/time.js';
 import { validateExportRequest } from '../../lib/validation.js';
 import { ExportStatus } from '../../database/exportsRepo.js';
-import { exportKey, exportReportKey } from '../r2/keys.js';
+import { exportKey } from '../r2/keys.js';
 
 export function createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport = null }) {
   const inflight = new Set();
-
-  /** Safe, user-facing reason (never the raw error text, which may contain provider URLs). */
-  function describeFailure(err) {
-    if (err instanceof DataNotReadyError) return 'the provider had not finalised the data for that day yet';
-    return 'the data provider could not deliver that day';
-  }
 
   function mapError(err, handle) {
     if (err instanceof AppError) return { code: err.code, message: err.message };
@@ -42,7 +36,6 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
     const { jobId, exportId, instrument, timeframe, start, end } = job;
     let objectKey = null;
     let ghKey = null;
-    let reportKey = null;
     let lastProgressWrite = 0;
     const onProgress = (p) => {
       const now = Date.now();
@@ -55,7 +48,6 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       const nowYear = yearOf(utcDateOf(clock()));
       const years = yearsInRange(start, end);
       const loaded = [];
-      let partial = null; // set when the provider stopped delivering part-way: we ship what we have
       for (const [idx, year] of years.entries()) {
         handle.signal.throwIfAborted();
         await exportsRepo.updateProgress(jobId, {
@@ -64,14 +56,13 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
           total: years.length,
           label: `Preparing ${year} data`,
         });
-        // Completed years are built/verified in full; the current year only up to the requested end.
-        const through = year < nowYear ? yearEndDate(year) : end;
+        // Every request works on WHOLE years: a completed year is downloaded in full (if not stored yet) and the
+        // user's range is cut out of it. The current year is downloaded through the last completed (and settled)
+        // day, never beyond, so a still-open candle is never fetched.
+        const lastFetchable = latestFetchableDay(clock(), config.daySettleMinutes);
+        const through = year < nowYear ? yearEndDate(year) : lastFetchable < yearEndDate(year) ? lastFetchable : yearEndDate(year);
         const res = await datasetService.ensure({ instrument, timeframe, year, through, signal: handle.signal, onProgress });
-        loaded.push({ year, set: res.set, completeThrough: res.completeThrough });
-        if (res.partial) {
-          partial = res.partial;
-          break; // later years would hit the same outage; deliver what was retrieved
-        }
+        loaded.push({ year, set: res.set, skipped: [...(await datasetService.loadSkipped(instrument, timeframe, year)).values()] });
       }
 
       handle.signal.throwIfAborted();
@@ -79,45 +70,16 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
 
       const segments = [];
       let rows = 0;
-      for (const { year, set, completeThrough } of loaded) {
+      for (const { year, set } of loaded) {
         const from = start > yearStartDate(year) ? start : yearStartDate(year);
-        let to = end < yearEndDate(year) ? end : yearEndDate(year);
-        if (completeThrough && completeThrough < to) to = completeThrough; // never claim days that were not retrieved
-        if (to < from) continue;
+        const to = end < yearEndDate(year) ? end : yearEndDate(year);
         const i0 = set.lowerBound(dayStartSec(from));
         const i1 = set.lowerBound(dayStartSec(addDays(to, 1))); // inclusive end date
         segments.push({ set, from: i0, to: i1 });
         rows += i1 - i0;
       }
 
-      if (rows === 0) {
-        // Nothing at all to deliver. If retrieval failed, say so; otherwise the pair simply has no data here.
-        if (partial) throw partial.error;
-        throw Errors.noData(); // e.g. a pair that was not listed yet, or a range the provider has no candles for
-      }
-
-      // Missing-data report (delivered next to the ZIP). Built from exactly the candles going into the CSV.
-      const inst = getInstrument(instrument);
-      const report = await buildGapReport({
-        segments,
-        start,
-        end,
-        stepSeconds: getTimeframe(timeframe).seconds,
-        calendar: inst.calendar,
-        extraClosedDates: config.extraClosedDates,
-        instrumentLabel: inst.label,
-        instrument,
-        timeframe,
-        retrieval: partial ? { stoppedBefore: partial.stoppedBefore, reason: describeFailure(partial.error) } : null,
-        nowMs: clock(),
-      });
-      let reportSize = null;
-      if (report) {
-        reportKey = exportReportKey(exportId);
-        const bytes = Buffer.from(report.text, 'utf8');
-        await storage.putObject(reportKey, bytes, { contentType: 'text/plain; charset=utf-8' });
-        reportSize = bytes.length;
-      }
+      if (rows === 0) throw Errors.noData(); // e.g. a pair that was not listed yet, or a range the provider has no candles for
 
       let fileSize;
       if (config.exportMode === 'github' && githubExport) {
@@ -140,8 +102,24 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       } else {
         // Local/development mode: the server builds the ZIP into R2 and streams it itself.
         objectKey = exportKey(exportId);
-        const csv = csvChunks(segments, csvOptionsFor(getInstrument(instrument)));
-        await storage.putChunks(objectKey, zipSingleFile(`${instrument}_${timeframe}_${start}_${end}.csv`, csv, clock()), { contentType: 'application/zip' });
+        const inst = getInstrument(instrument);
+        const base = `${instrument}_${timeframe}_${start}_${end}`;
+        const report = await buildGapReport({
+          skipped: loaded.flatMap((l) => l.skipped),
+          segments,
+          start,
+          end,
+          stepSeconds: getTimeframe(timeframe).seconds,
+          calendar: inst.calendar,
+          extraClosedDates: config.extraClosedDates,
+          instrumentLabel: inst.label,
+          instrument,
+          timeframe,
+          nowMs: clock(),
+        });
+        const entries = [{ name: `${base}.csv`, source: csvChunks(segments, csvOptionsFor(inst)) }];
+        if (report) entries.push({ name: `${base}_missing_data.txt`, source: [Buffer.from(report.text, 'utf8')] });
+        await storage.putChunks(objectKey, zipFiles(entries, clock()), { contentType: 'application/zip' });
         handle.signal.throwIfAborted();
         const head = await storage.headObject(objectKey);
         if (!head) throw new Error('stored ZIP not found');
@@ -156,7 +134,6 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         objectKey: ghKey ?? objectKey,
         fileSize,
         rowCount: rows,
-        reportSize,
         tokenHash: sha256Hex(token),
         createdAt,
         expiresAt,
@@ -167,7 +144,6 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       const mapped = mapError(err, handle);
       logger.error('export failed', { jobId, code: mapped.code, error: err });
       if (objectKey) await storage.deleteObject(objectKey).catch(() => {}); // never leave a partial CSV behind
-      if (reportKey) await storage.deleteObject(reportKey).catch(() => {});
       await exportsRepo.markFailed(jobId, mapped).catch((e) => logger.error('could not mark export failed', { jobId, error: e }));
     } finally {
       await handle.finish(); // lock released only AFTER the row reached READY/FAILED
@@ -192,13 +168,6 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         fileSize: row.fileSize,
         rows: row.rowCount,
         filename: `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}.zip`,
-        report: row.reportSize
-          ? {
-              url: `/api/export/download/${token}/report`,
-              fileSize: row.reportSize,
-              filename: `${row.instrument}_${row.timeframe}_${row.startDate}_${row.endDate}_missing_data.txt`,
-            }
-          : null,
       };
     }
     return {

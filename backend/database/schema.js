@@ -64,7 +64,6 @@ export const SCHEMA = [
     object_key TEXT,
     file_size BIGINT,
     row_count BIGINT,
-    report_size BIGINT,
     download_token_hash TEXT,
     error_code TEXT,
     error_message TEXT,
@@ -77,7 +76,3 @@ export const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS exports_session_idx ON exports (session_hash, requested_at)`,
   `CREATE INDEX IF NOT EXISTS exports_status_idx ON exports (status)`,
 ];
-
-// Applied on PostgreSQL after SCHEMA so databases created by an earlier version gain new columns.
-// (SQLite databases are test/dev only and are always created fresh from SCHEMA.)
-export const PG_MIGRATIONS = [`ALTER TABLE exports ADD COLUMN IF NOT EXISTS report_size BIGINT`];

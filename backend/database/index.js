@@ -2,7 +2,7 @@
 //   query(sql, params) -> { rows, rowCount }     exec(sql)     close()
 // SQL uses $1, $2 ... placeholders (PostgreSQL style); the SQLite adapter rewrites them to ?1, ?2.
 
-import { PG_MIGRATIONS, SCHEMA } from './schema.js';
+import { SCHEMA } from './schema.js';
 
 /** Production adapter: PostgreSQL via `pg` (imported lazily). */
 export async function createPgDb({ connectionString, ssl = false, onError = () => {} }) {
@@ -80,5 +80,4 @@ export async function createDb(config, { onError } = {}) {
 
 export async function migrate(db) {
   for (const statement of SCHEMA) await db.exec(statement);
-  if (db.dialect === 'postgres') for (const statement of PG_MIGRATIONS) await db.exec(statement);
 }

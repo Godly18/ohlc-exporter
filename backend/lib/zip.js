@@ -22,91 +22,104 @@ function dosDateTime(ms) {
 }
 
 /**
- * @param {string} entryName  file name inside the archive, e.g. EUR_USD_M1_2026-09-01_2026-09-13.csv
- * @param {AsyncIterable<Buffer>} source  the file's bytes
- * @param {number} mtimeMs    modification time stored on the entry (UTC)
+ * @param {Array<{name: string, source: AsyncIterable<Buffer>}>} entries  files to put in the archive, in order
+ * @param {number} mtimeMs    modification time stored on the entries (UTC)
  * @returns {AsyncGenerator<Buffer>} the ZIP archive bytes
  */
-export async function* zipSingleFile(entryName, source, mtimeMs) {
-  const name = Buffer.from(entryName, 'utf8');
+export async function* zipFiles(entries, mtimeMs) {
   const { time, date } = dosDateTime(mtimeMs);
+  const done = []; // finished entries, for the central directory
+  let offset = 0;
 
-  const local = Buffer.alloc(30);
-  local.writeUInt32LE(0x04034b50, 0);
-  local.writeUInt16LE(VERSION, 4);
-  local.writeUInt16LE(FLAGS, 6);
-  local.writeUInt16LE(8, 8); // deflate
-  local.writeUInt16LE(time, 10);
-  local.writeUInt16LE(date, 12);
-  // crc32, compressed size, uncompressed size = 0 (in data descriptor)
-  local.writeUInt16LE(name.length, 26);
-  yield Buffer.concat([local, name]);
-  let offset = local.length + name.length;
+  for (const { name: entryName, source } of entries) {
+    const name = Buffer.from(entryName, 'utf8');
+    const entryOffset = offset;
 
-  const deflate = zlib.createDeflateRaw({ level: 6 });
-  const stop = new AbortController();
-  let crc = 0;
-  let usize = 0;
-  let csize = 0;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(VERSION, 4);
+    local.writeUInt16LE(FLAGS, 6);
+    local.writeUInt16LE(8, 8); // deflate
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    // crc32, compressed size, uncompressed size = 0 (in data descriptor)
+    local.writeUInt16LE(name.length, 26);
+    yield Buffer.concat([local, name]);
+    offset += local.length + name.length;
 
-  const feeder = (async () => {
-    try {
-      for await (const chunk of source) {
-        crc = zlib.crc32(chunk, crc);
-        usize += chunk.length;
-        if (!deflate.write(chunk)) await once(deflate, 'drain', { signal: stop.signal });
+    const deflate = zlib.createDeflateRaw({ level: 6 });
+    const stop = new AbortController();
+    let crc = 0;
+    let usize = 0;
+    let csize = 0;
+
+    const feeder = (async () => {
+      try {
+        for await (const chunk of source) {
+          crc = zlib.crc32(chunk, crc);
+          usize += chunk.length;
+          if (!deflate.write(chunk)) await once(deflate, 'drain', { signal: stop.signal });
+        }
+        deflate.end();
+      } catch (err) {
+        deflate.destroy(err);
       }
-      deflate.end();
-    } catch (err) {
-      deflate.destroy(err);
-    }
-  })();
+    })();
 
-  try {
-    for await (const out of deflate) {
-      csize += out.length;
-      offset += out.length;
-      yield out;
+    try {
+      for await (const out of deflate) {
+        csize += out.length;
+        offset += out.length;
+        yield out;
+      }
+    } finally {
+      stop.abort(); // consumer gave up or an error occurred: release the feeder
+      deflate.destroy();
+      await feeder.catch(() => {});
     }
-  } finally {
-    stop.abort(); // consumer gave up or an error occurred: release the feeder
-    deflate.destroy();
-    await feeder.catch(() => {});
+
+    if (usize > MAX_32 || csize > MAX_32 || offset > MAX_32) throw new Error('export too large for a standard ZIP file');
+    crc >>>= 0;
+
+    const descriptor = Buffer.alloc(16);
+    descriptor.writeUInt32LE(0x08074b50, 0);
+    descriptor.writeUInt32LE(crc, 4);
+    descriptor.writeUInt32LE(csize, 8);
+    descriptor.writeUInt32LE(usize, 12);
+    yield descriptor;
+    offset += descriptor.length;
+    done.push({ name, crc, csize, usize, entryOffset });
   }
 
-  if (usize > MAX_32 || csize > MAX_32) throw new Error('export too large for a standard ZIP file');
-  crc >>>= 0;
-
-  const descriptor = Buffer.alloc(16);
-  descriptor.writeUInt32LE(0x08074b50, 0);
-  descriptor.writeUInt32LE(crc, 4);
-  descriptor.writeUInt32LE(csize, 8);
-  descriptor.writeUInt32LE(usize, 12);
-  yield descriptor;
-  offset += descriptor.length;
-
-  const central = Buffer.alloc(46);
-  central.writeUInt32LE(0x02014b50, 0);
-  central.writeUInt16LE((3 << 8) | VERSION, 4); // made by: Unix, 2.0
-  central.writeUInt16LE(VERSION, 6);
-  central.writeUInt16LE(FLAGS, 8);
-  central.writeUInt16LE(8, 10);
-  central.writeUInt16LE(time, 12);
-  central.writeUInt16LE(date, 14);
-  central.writeUInt32LE(crc, 16);
-  central.writeUInt32LE(csize, 20);
-  central.writeUInt32LE(usize, 24);
-  central.writeUInt16LE(name.length, 28);
-  central.writeUInt32LE(((0o100644 << 16) >>> 0), 38); // regular file, rw-r--r--
-  central.writeUInt32LE(0, 42); // local header offset
-  const centralSize = central.length + name.length;
-  yield Buffer.concat([central, name]);
+  const centralStart = offset;
+  let centralSize = 0;
+  for (const e of done) {
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE((3 << 8) | VERSION, 4); // made by: Unix, 2.0
+    central.writeUInt16LE(VERSION, 6);
+    central.writeUInt16LE(FLAGS, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt16LE(time, 12);
+    central.writeUInt16LE(date, 14);
+    central.writeUInt32LE(e.crc, 16);
+    central.writeUInt32LE(e.csize, 20);
+    central.writeUInt32LE(e.usize, 24);
+    central.writeUInt16LE(e.name.length, 28);
+    central.writeUInt32LE((0o100644 << 16) >>> 0, 38); // regular file, rw-r--r--
+    central.writeUInt32LE(e.entryOffset, 42); // local header offset
+    centralSize += central.length + e.name.length;
+    yield Buffer.concat([central, e.name]);
+  }
 
   const end = Buffer.alloc(22);
   end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(1, 8);
-  end.writeUInt16LE(1, 10);
+  end.writeUInt16LE(done.length, 8);
+  end.writeUInt16LE(done.length, 10);
   end.writeUInt32LE(centralSize, 12);
-  end.writeUInt32LE(offset, 16);
+  end.writeUInt32LE(centralStart, 16);
   yield end;
 }
+
+/** One-file archive (kept for callers and tests that only need a single entry). */
+export const zipSingleFile = (entryName, source, mtimeMs) => zipFiles([{ name: entryName, source }], mtimeMs);

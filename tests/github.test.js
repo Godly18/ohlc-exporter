@@ -8,7 +8,7 @@ import { ExportFileError, writeExportCsv } from '../backend/lib/exportFile.js';
 import { createGithubClient, githubKey, parseGithubKey } from '../backend/services/github/client.js';
 import { silentLogger } from '../backend/lib/logger.js';
 import { createHarness } from './helpers/harness.js';
-import { unzipSingle } from './helpers/unzip.js';
+import { unzipAll, unzipSingle } from './helpers/unzip.js';
 
 let h;
 afterEach(async () => {
@@ -185,6 +185,17 @@ describe('GitHub Actions offload', () => {
     assert.match(job.error.message, /did not start/);
   });
 
+  it('the GitHub artifact ZIP contains the CSV and, when candles are missing, the missing-data .txt', async () => {
+    h = await createHarness({ useGithub: true });
+    h.oanda.emptyDays.add('2026-09-09');
+    const job = await run(h.browser(), body('EUR_USD', '2026-09-08', '2026-09-10'));
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
+    const [artifact] = [...h.github.artifacts.values()];
+    const names = unzipAll(artifact.zip).map((f) => f.name);
+    assert.deepEqual(names, ['EUR_USD_M1_2026-09-08_2026-09-10.csv', 'EUR_USD_M1_2026-09-08_2026-09-10_missing_data.txt']);
+    assert.match(unzipAll(artifact.zip)[1].data.toString(), /2026-09-09 \(Wed\)/);
+  });
+
   it('reports "no data" before ever calling GitHub', async () => {
     h = await createHarness({ useGithub: true, binanceOpts: { listedFrom: '2026-09-10' } });
     const job = await run(h.browser(), body('LINKBTC', '2026-09-01', '2026-09-05'));
@@ -212,10 +223,10 @@ describe('export builder shared with the workflow script', () => {
     assert.ok(res.rows > 0);
     assert.equal(readFileSync(out, 'utf8').split('\n')[1].split(',')[0], '2026-09-02T00:00:00Z');
 
-    // retrieved only through Sep 3: the CSV holds what exists and the notes say so (no error)
-    const part = await writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2026-09-02', end: '2026-09-05', outFile: out });
-    assert.equal(part.rows, res.rows);
-    assert.ok(part.notes.some((n) => /retrieved only through 2026-09-03/.test(n)));
+    // retrieved only through Sep 13 (the whole year so far): the CSV holds what exists and the notes say so (no error)
+    const part = await writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2026-09-02', end: '2026-09-20', outFile: out });
+    assert.ok(part.rows > res.rows);
+    assert.ok(part.notes.some((n) => /retrieved only through 2026-09-13/.test(n)));
     // a year that was never built has nothing to write
     await assert.rejects(writeExportCsv({ storage: h.storage, instrument: 'EUR_USD', timeframe: 'M1', start: '2025-09-02', end: '2025-09-05', outFile: out }), /no candles/);
     // a tampered dataset is refused

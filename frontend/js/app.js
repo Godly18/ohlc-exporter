@@ -20,8 +20,6 @@ const els = {
   download: $('download'),
   link: $('download-link'),
   meta: $('download-meta'),
-  report: $('report-link'),
-  reportNote: $('report-note'),
   countdown: $('countdown'),
 };
 
@@ -29,7 +27,7 @@ let pollTimer = null;
 let tickTimer = null;
 let deadline = 0; // performance.now() value at which the download expires (display only)
 let polling = false;
-const state = { latest: '', maxDays: 0, expiry: 5 };
+const state = { latest: '', maxYears: 2, expiry: 5, minDate: '' };
 
 async function api(path, options = {}) {
   const res = await fetch(path, { credentials: 'same-origin', ...options });
@@ -113,13 +111,6 @@ function renderJob(job) {
     showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
     els.link.href = job.download.url;
     els.link.setAttribute('download', job.download.filename);
-    const hasReport = !!job.download.report;
-    els.report.classList.toggle('hidden', !hasReport);
-    els.reportNote.classList.toggle('hidden', !hasReport);
-    if (hasReport) {
-      els.report.href = job.download.report.url;
-      els.report.setAttribute('download', job.download.report.filename);
-    }
     els.meta.textContent = `${job.download.rows.toLocaleString()} rows · ${formatBytes(job.download.fileSize)}`;
     deadline = performance.now() + job.download.expiresInSeconds * 1000;
     els.download.classList.remove('hidden');
@@ -167,6 +158,8 @@ function clientCheck() {
   const { value: end } = els.end;
   if (!start || !end) return 'Please choose a start and an end date.';
   if (start > end) return 'Invalid date range. The start date must not be later than the end date.';
+  if (end > state.latest) return `The last selectable day is ${state.latest} (UTC). Today is never available.`;
+  if (end > maxEndFor(start, state.maxYears)) return `Please request at most ${state.maxYears} years at a time.`;
   return null;
 }
 
@@ -257,15 +250,64 @@ function comboActivate(i) {
   li.scrollIntoView({ block: 'nearest' });
 }
 
+// ---- Range limits in the calendar: at most `maxYears` years per request, never later than yesterday (UTC) ----
+const pad = (n) => String(n).padStart(2, '0');
+const ymd = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+function addDaysStr(date, n) {
+  const [y, m, d] = date.split('-').map(Number);
+  return ymd(new Date(Date.UTC(y, m - 1, d + n)));
+}
+/** Last allowed end date for a start date: the day before its `years`-th anniversary (matches the server). */
+function maxEndFor(start, years) {
+  const [y, m, d] = start.split('-').map(Number);
+  const anniversary = new Date(Date.UTC(y + years, m - 1, d));
+  if (anniversary.getUTCMonth() !== m - 1) anniversary.setUTCDate(0);
+  return ymd(new Date(anniversary.getTime() - 86_400_000));
+}
+/** Earliest start date that still allows `end`. */
+function minStartFor(end, years) {
+  const [y, m, d] = end.split('-').map(Number);
+  let s = ymd(new Date(Date.UTC(y - years, m - 1, d + 1)));
+  while (maxEndFor(s, years) < end) s = addDaysStr(s, 1);
+  return s;
+}
+function applyRangeLimits() {
+  const latest = state.latest;
+  const lowest = state.minDate || '0000-01-01';
+  if (els.start.value) {
+    const cap = maxEndFor(els.start.value, state.maxYears);
+    els.end.max = cap < latest ? cap : latest;
+    els.end.min = els.start.value > lowest ? els.start.value : lowest;
+  } else {
+    els.end.max = latest;
+    els.end.min = lowest;
+  }
+  if (els.end.value) {
+    const floor = minStartFor(els.end.value, state.maxYears);
+    els.start.min = floor > lowest ? floor : lowest;
+  } else {
+    els.start.min = lowest;
+  }
+  els.start.max = els.end.value && els.end.value < latest ? els.end.value : latest;
+}
+els.start.addEventListener('change', () => {
+  applyRangeLimits();
+  if (els.end.value && els.end.max && els.end.value > els.end.max) els.end.value = els.end.max;
+  applyRangeLimits();
+});
+els.end.addEventListener('change', applyRangeLimits);
+
 /** The date pickers start at the instrument's first available year (crypto 2018, gold 2021, forex 2010). */
 function applyMinYear(inst) {
   const min = `${inst.minYear}-01-01`;
+  state.minDate = min;
   els.start.min = els.end.min = min;
   for (const input of [els.start, els.end]) {
     if (input.value && input.value < min) input.value = min <= (input.max || min) ? min : '';
   }
+  applyRangeLimits();
   els.hint.classList.remove('error');
-  els.hint.textContent = `${inst.label}: data from ${inst.minYear} to ${state.latest} (UTC). Up to ${state.maxDays} days per request. Downloads stay valid for ${state.expiry} minutes.`;
+  els.hint.textContent = `${inst.label}: data from ${inst.minYear} to ${state.latest} (UTC). Up to ${state.maxYears} years per request. Downloads stay valid for ${state.expiry} minutes.`;
 }
 
 function comboChoose(code) {
@@ -329,9 +371,9 @@ async function init() {
     combo.byCode = new Map(cfg.instruments.map((i) => [i.code, i]));
     for (const code of cfg.timeframes) els.timeframe.add(new Option(code, code));
     state.latest = cfg.latestSelectableDate;
-    state.maxDays = cfg.maxExportDays;
+    state.maxYears = cfg.maxExportYears;
     state.expiry = cfg.exportExpirationMinutes;
-    els.start.max = els.end.max = cfg.latestSelectableDate; // yesterday (UTC): today is never available
+    els.start.max = els.end.max = cfg.latestSelectableDate; // yesterday (UTC): today is never available, for both calendars
     comboChoose(combo.byCode.has('EUR_USD') ? 'EUR_USD' : combo.all[0].code);
   } catch {
     els.hint.textContent = 'Could not load settings. Please refresh the page.';

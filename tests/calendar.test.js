@@ -14,7 +14,7 @@ import {
 } from '../backend/lib/time.js';
 import { validateExportRequest } from '../backend/lib/validation.js';
 
-const { config } = loadConfig({ MIN_DATA_YEAR: '2020', MAX_EXPORT_DAYS: '800', DAY_SETTLE_MINUTES: '10' });
+const { config } = loadConfig({ MIN_DATA_YEAR: '2020', MAX_EXPORT_YEARS: '2', DAY_SETTLE_MINUTES: '10' });
 const at = (iso) => Date.parse(iso);
 const req = (start, end, extra = {}) => ({ instrument: 'EUR_USD', timeframe: 'M1', start_date: start, end_date: end, ...extra });
 const code = (fn) => {
@@ -84,7 +84,7 @@ describe('export request validation', () => {
 
   it('accepts cross-month and cross-year ranges', () => {
     assert.ok(validateExportRequest(req('2026-08-20', '2026-09-05'), now, config));
-    assert.ok(validateExportRequest(req('2024-11-20', '2026-02-10'), now, { ...config, maxExportDays: 2000 }));
+    assert.ok(validateExportRequest(req('2024-11-20', '2026-02-10'), now, { ...config, maxExportYears: 3 }));
   });
 
   it('rejects the current UTC day with the in-progress message', () => {
@@ -159,5 +159,24 @@ describe('day availability states', () => {
     assert.equal(computeDayState({ ...base, date: '2026-09-12', nowMs: now, transient: 'DOWNLOADING' }), DayState.DOWNLOADING);
     assert.equal(computeDayState({ ...base, date: '2026-09-12', nowMs: now, transient: 'VERIFYING' }), DayState.VERIFYING);
     assert.equal(computeDayState({ ...base, date: '2026-09-12', nowMs: now, transient: 'FAILED' }), DayState.FAILED);
+  });
+});
+
+describe('two-year request limit and calendar bounds', () => {
+  const now = at('2026-09-14T12:00:00Z');
+  it('maxEndForYears is the day before the 2nd anniversary (leap days never spill into March)', async () => {
+    const { maxEndForYears } = await import('../backend/lib/time.js');
+    assert.equal(maxEndForYears('2024-03-10', 2), '2026-03-09');
+    assert.equal(maxEndForYears('2024-01-01', 2), '2025-12-31');
+    assert.equal(maxEndForYears('2024-02-29', 2), '2026-02-27');
+    assert.equal(maxEndForYears('2025-06-15', 1), '2026-06-14');
+  });
+
+  it('accepts exactly 2 years and rejects one day more, with a years-based message', () => {
+    const c2 = { ...config, maxExportYears: 2 };
+    assert.ok(validateExportRequest(req('2024-09-14', '2026-09-13'), now, c2));
+    const e = code(() => validateExportRequest(req('2024-09-12', '2026-09-13'), now, c2));
+    assert.equal(e.code, 'RANGE_TOO_LARGE');
+    assert.equal(e.message, 'The requested range is too large. Please request at most 2 years at a time.');
   });
 });

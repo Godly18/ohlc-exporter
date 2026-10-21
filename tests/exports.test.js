@@ -6,8 +6,8 @@ import { createHarness } from './helpers/harness.js';
 
 const body = (start, end, extra = {}) => ({ instrument: 'EUR_USD', timeframe: 'M1', start_date: start, end_date: end, ...extra });
 const parseCsv = (text) => text.trim().split('\n').slice(1).map((l) => l.split(','));
-const exportsInStorage = (h) => h.storage.keys('exports/').filter((k) => k.endsWith('.zip'));
-const reportsInStorage = (h) => h.storage.keys('exports/').filter((k) => k.endsWith('_missing.txt'));
+const exportsInStorage = (h) => h.storage.keys('exports/');
+const reportOf = (res) => res.files.find((f) => f.name.endsWith('_missing_data.txt'))?.data.toString('utf8') ?? null;
 
 let h;
 afterEach(async () => {
@@ -55,7 +55,7 @@ describe('CSV generation', () => {
     const job = await generate(c, '2025-07-01', '2025-07-31');
     assert.equal(job.status, 'READY');
     assert.equal(h.oanda.calls.length, 0);
-    const datasetReads = h.storage.ops.filter((o) => o.startsWith('get:oanda-data/'));
+    const datasetReads = h.storage.ops.filter((o) => o.startsWith('get:oanda-data/') && o.endsWith('.bin'));
     assert.deepEqual(datasetReads, [`get:${datasetKey('EUR_USD', 'M1', 2025)}`]);
   });
 
@@ -80,7 +80,7 @@ describe('CSV generation', () => {
     const c = h.browser();
     const job = await generate(c, '2026-09-08', '2026-09-12');
     assert.equal(job.status, 'READY');
-    assert.deepEqual(h.oanda.calls.map((x) => x.date), ['2026-09-11', '2026-09-12']);
+    assert.deepEqual(h.oanda.calls.map((x) => x.date), ['2026-09-11', '2026-09-12', '2026-09-13'], 'the current year is caught up through yesterday, not only to the requested end');
   });
 });
 
@@ -110,60 +110,32 @@ describe('availability: never return partial or in-progress data', () => {
     assert.equal(res.json.error.message, 'Data not available yet. The requested date has not been fully processed and verified. Please retry later.');
   });
 
-  it('a day OANDA has not completed no longer blocks the export: the retrieved days are delivered with a missing-data report', async () => {
+  it('a day OANDA has not completed fails the whole request: nothing partial is delivered or stored, lock released', async () => {
     h = await createHarness();
     h.oanda.incompleteDays.add('2026-09-13');
     const c = h.browser();
     const job = await generate(c, '2026-09-01', '2026-09-13');
-    assert.equal(job.status, 'READY', JSON.stringify(job.error));
-    assert.ok(job.download.report, 'a report is offered next to the ZIP');
-    assert.equal(job.download.report.filename, 'EUR_USD_M1_2026-09-01_2026-09-13_missing_data.txt');
-    const csv = (await c.request(job.download.url)).text.trimEnd().split('\n');
-    assert.ok(csv.some((l) => l.startsWith('2026-09-11T')), 'earlier days are in the CSV');
-    assert.ok(!csv.some((l) => l.startsWith('2026-09-13')), 'the unretrieved day is not claimed');
-    const rep = await c.request(job.download.report.url);
-    assert.equal(rep.status, 200);
-    assert.match(rep.headers.get('content-disposition'), /_missing_data\.txt/);
-    assert.match(rep.text, /INCOMPLETE RETRIEVAL/);
-    assert.match(rep.text, /stopped before 2026-09-13/);
-    assert.match(rep.text, /2026-09-13 \(Sun\)/);
-    assert.equal(await h.services.lock.current(), null);
-    // The retrieved days were saved to R2; the unverified day is not claimed.
-    const m = await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026);
-    assert.equal(m.lastCompleteDate, '2026-09-12');
-  });
-
-  it('when nothing at all could be retrieved the request fails with the not-verified message and no files', async () => {
-    h = await createHarness();
-    h.oanda.incompleteDays.add('2026-09-01');
-    const job = await generate(h.browser(), '2026-09-01', '2026-09-03');
     assert.equal(job.status, 'FAILED');
+    assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
     assert.equal(job.error.message, 'Data not available yet. The requested date has not been fully processed and verified. Please retry later.');
     assert.equal(job.download, null);
     assert.equal(exportsInStorage(h).length, 0);
-    assert.equal(reportsInStorage(h).length, 0);
+    assert.equal(await h.services.lock.current(), null);
+    // Nothing from the unfinished retrieval was saved.
+    assert.ok(!['COMPLETE', 'COMPLETE_THROUGH_DAY'].includes((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026))?.status));
+    assert.deepEqual(h.storage.keys('oanda-data/'), []);
   });
 
-  it('an empty weekday (provider hole) is delivered and listed in the report instead of failing', async () => {
+  it('an empty weekday (provider hole) is delivered, and the ZIP holds the CSV plus a missing-data .txt', async () => {
     h = await createHarness();
     h.oanda.emptyDays.add('2026-09-09'); // a Wednesday with no candles
     const c = h.browser();
     const job = await generate(c, '2026-09-08', '2026-09-10');
     assert.equal(job.status, 'READY', JSON.stringify(job.error));
-    const rep = (await c.request(job.download.report.url)).text;
-    assert.match(rep, /DAYS WITH NO DATA AT ALL\n-+\n2026-09-09 \(Wed\)/);
-    assert.doesNotMatch(rep, /INCOMPLETE RETRIEVAL/);
-  });
-
-  it('report endpoint honours the same token and the same 5-minute expiry', async () => {
-    h = await createHarness();
-    h.oanda.emptyDays.add('2026-09-09');
-    const c = h.browser();
-    const job = await generate(c, '2026-09-08', '2026-09-10');
-    assert.equal((await c.request(job.download.report.url)).status, 200);
-    assert.equal((await h.browser().request('/api/export/download/not-a-token/report')).status, 404);
-    h.clock.advance(5 * 60_000 + 1);
-    assert.equal((await c.request(job.download.report.url)).status, 410);
+    const res = await c.request(job.download.url);
+    assert.deepEqual(res.files.map((f) => f.name), ['EUR_USD_M1_2026-09-08_2026-09-10.csv', 'EUR_USD_M1_2026-09-08_2026-09-10_missing_data.txt']);
+    assert.match(reportOf(res), /DAYS WITH NO DATA AT ALL\n-+\n2026-09-09 \(Wed\)/);
+    assert.ok(!res.files[0].data.toString().includes('2026-09-09T'));
   });
 });
 
@@ -258,7 +230,6 @@ describe('cleanup of temporary exports', () => {
     h.clock.advance(3 * 60_000);
     await h.services.cleanup.runExpiredCleanup();
     assert.equal(exportsInStorage(h).length, 0);
-    assert.equal(reportsInStorage(h).length, 0, 'reports are deleted together with their ZIP');
     assert.deepEqual(h.storage.keys('oanda-data/'), datasets, 'permanent .bin untouched');
   });
 
@@ -367,5 +338,53 @@ describe('maintenance of current-year data', () => {
     const next = await h.services.datasetsRepo.get('EUR_USD', 'M1', 2027);
     assert.equal(next.status, 'COMPLETE_THROUGH_DAY');
     assert.equal(next.lastCompleteDate, '2027-01-01');
+  });
+});
+
+describe('whole-year downloads', () => {
+  it('a request inside a completed year makes the backend download the WHOLE year, then cuts out the range', async () => {
+    h = await createHarness();
+    const c = h.browser();
+    const job = await generate(c, '2025-06-15', '2025-06-16');
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
+    assert.equal(h.oanda.calls.length, 365, 'every day of 2025 was fetched');
+    const m = await h.services.datasetsRepo.get('EUR_USD', 'M1', 2025);
+    assert.equal(m.status, 'COMPLETE');
+    const rows = (await c.request(job.download.url)).text.trimEnd().split('\n').slice(1);
+    assert.ok(rows.every((r) => r.startsWith('2025-06-15') || r.startsWith('2025-06-16')), 'only the requested days are in the CSV');
+  });
+
+  it('a range in the current year downloads every completed day through yesterday, never today', async () => {
+    h = await createHarness(); // now = 2026-09-14 12:00 UTC
+    const job = await generate(h.browser(), '2026-09-01', '2026-09-02');
+    assert.equal(job.status, 'READY');
+    const dates = h.oanda.calls.map((x) => x.date);
+    assert.equal(dates[0], '2026-01-01');
+    assert.equal(dates[dates.length - 1], '2026-09-13');
+    assert.ok(!dates.includes('2026-09-14'));
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-13');
+  });
+
+  it('a range spanning two completed years and the current year loads all three whole years', async () => {
+    h = await createHarness();
+    const job = await generate(h.browser(), '2025-12-20', '2026-01-10');
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
+    const years = new Set(h.oanda.calls.map((x) => x.date.slice(0, 4)));
+    assert.deepEqual([...years], ['2025', '2026']);
+    assert.equal(h.oanda.calls.filter((x) => x.date.startsWith('2025')).length, 365);
+  });
+
+  it('invalid candles are skipped and listed in the ZIP report; the calendar API offers only up to yesterday', async () => {
+    h = await createHarness();
+    h.oanda.badOhlcDays.add('2026-09-09');
+    const c = h.browser();
+    const job = await generate(c, '2026-09-08', '2026-09-10');
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
+    const rep = reportOf(await c.request(job.download.url));
+    assert.match(rep, /INVALID CANDLES SKIPPED\n-+\n.*\n2026-09-09T\d\d:\d\d:00Z {2}invalid OHLC relationship/);
+    assert.match(rep, /Invalid candles skipped +: \d+/);
+    const cfg = (await c.request('/api/config')).json;
+    assert.equal(cfg.latestSelectableDate, '2026-09-13');
+    assert.equal(cfg.maxExportYears, 3); // harness override; production default is 2
   });
 });

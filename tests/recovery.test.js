@@ -157,25 +157,20 @@ describe('crash safety of generation and storage', () => {
     ]);
   });
 
-  it('an outage during an OANDA download still delivers (and saves) what was retrieved; the next run completes it', async () => {
+  it('an outage during an OANDA download fails the request and saves nothing; the next run completes cleanly', async () => {
     const h = await make();
     h.oanda.failOn = (d) => (d === '2026-01-10' ? new Error('connection reset') : undefined);
     const c = h.browser();
     const res = await c.request('/api/export', { method: 'POST', body: body('2026-01-05', '2026-01-20') });
     const job = await h.waitForJob(c, res.json.jobId);
-    assert.equal(job.status, 'READY');
-    assert.ok(job.download.report, 'the report says where retrieval stopped');
-    const report = (await c.request(job.download.report.url)).text;
-    assert.match(report, /stopped before 2026-01-10/);
-    assert.ok(!report.includes('connection reset'), 'raw provider errors are never shown to users');
-    const m = await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026);
-    assert.equal(m.lastCompleteDate, '2026-01-09');
-    assert.deepEqual(h.storage.keys('oanda-data/'), ['oanda-data/EUR_USD/M1/2026.bin']);
+    assert.equal(job.status, 'FAILED');
+    assert.equal(job.download, null);
+    assert.deepEqual(h.storage.keys('oanda-data/'), []);
 
     h.oanda.failOn = null;
     const again = await c.request('/api/export', { method: 'POST', body: body('2026-01-05', '2026-01-20') });
     assert.equal((await h.waitForJob(c, again.json.jobId)).status, 'READY');
-    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-01-20');
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-13');
   });
 
   it('corrupted datasets are rebuilt transparently while serving a user request', async () => {

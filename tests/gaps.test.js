@@ -87,12 +87,6 @@ describe('missing-data report', () => {
     assert.equal(await report(held, { start: '2026-09-01', end: '2026-09-03', calendar: 'fx', extraClosedDates: new Set(['2026-09-02']) }), null);
   });
 
-  it('a retrieval stop is explained even when the missing tail is only closed-market time', async () => {
-    const r = await report(minutes('2026-09-01'), { start: '2026-09-01', end: '2026-09-01', calendar: 'always', retrieval: { stoppedBefore: '2026-09-02', reason: 'the data provider could not deliver that day' } });
-    assert.match(r.text, /INCOMPLETE RETRIEVAL/);
-    assert.match(r.text, /stopped before 2026-09-02 \(the data provider/);
-  });
-
   it('caps the listed ranges but still counts everything', async () => {
     const candles = [];
     const base = dayStartSec('2026-09-01');

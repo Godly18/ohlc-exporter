@@ -91,6 +91,18 @@ export function latestFetchableDay(nowMs, settleMinutes) {
   return nowMs >= startOfToday + settleMinutes * 60_000 ? completed : addDays(completed, -1);
 }
 
+/**
+ * Last end date allowed for a request that starts on `start` and may span at most `years` calendar years:
+ * the day before the start date's `years`-th anniversary (2024-03-10 -> 2026-03-09). Feb 29 anniversaries
+ * fall back to Feb 28 + 1 day logic of Date, i.e. the end is still strictly before the anniversary.
+ */
+export function maxEndForYears(start, years) {
+  const [y, m, d] = start.split('-').map(Number);
+  const anniversary = new Date(Date.UTC(y + years, m - 1, d));
+  if (anniversary.getUTCMonth() !== m - 1) anniversary.setUTCDate(0); // Feb 29 -> Feb 28 (never spill into March)
+  return fromDayNumber(Math.round(anniversary.getTime() / DAY_MS) - 1);
+}
+
 export function isSaturday(date) {
   return new Date(dayStartMs(date)).getUTCDay() === 6;
 }

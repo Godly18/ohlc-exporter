@@ -88,14 +88,13 @@ export function loadConfig(env = process.env) {
     exportTokenSecret: str('EXPORT_TOKEN_SECRET'),
     exportExpirationMinutes: Math.max(1, int('EXPORT_EXPIRATION_MINUTES', 5)),
     cleanupIntervalSeconds: Math.max(5, int('CLEANUP_INTERVAL_SECONDS', 60)),
-    maxExportDays: Math.max(1, int('MAX_EXPORT_DAYS', 800)),
+    maxExportYears: Math.max(1, Math.min(10, int('MAX_EXPORT_YEARS', 2))),
 
     lockLeaseSeconds: Math.max(10, int('LOCK_LEASE_SECONDS', 90)),
     lockHeartbeatSeconds: Math.max(1, int('LOCK_HEARTBEAT_SECONDS', 15)),
 
     daySettleMinutes: Math.max(0, int('DAY_SETTLE_MINUTES', 10)),
     minDataYear: int('MIN_DATA_YEAR', 2010),
-    checkpointDays: Math.max(1, int('CHECKPOINT_DAYS', 30)),
     extraClosedDates: new Set(
       str('EXTRA_CLOSED_DATES')
         .split(',')

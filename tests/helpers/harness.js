@@ -1,6 +1,6 @@
 // Test harness: real services + real HTTP server, with SQLite, in-memory R2 and fake OANDA.
 
-import { unzipSingle } from './unzip.js';
+import { unzipAll, unzipSingle } from './unzip.js';
 import http from 'node:http';
 import { createApp } from '../../backend/app.js';
 import { createServices } from '../../backend/bootstrap.js';
@@ -34,8 +34,7 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
     LOCK_HEARTBEAT_SECONDS: '1',
     LOCK_LEASE_SECONDS: '90',
     MIN_DATA_YEAR: '2020',
-    MAX_EXPORT_DAYS: '2000',
-    CHECKPOINT_DAYS: '30',
+    MAX_EXPORT_YEARS: '3',
     MAINTENANCE_ENABLED: 'false',
     RATE_LIMIT_API_PER_MIN: '100000',
     RATE_LIMIT_EXPORT_PER_MIN: '100000',
@@ -93,7 +92,8 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
         } catch {
           /* not JSON (CSV, HTML) */
         }
-        return { status: res.status, json, text, body: raw, headers: res.headers };
+        const files = isZip ? unzipAll(raw) : null; // every entry of a zip response: [{ name, data }]
+        return { status: res.status, json, text, body: raw, headers: res.headers, files };
       },
     };
   }
