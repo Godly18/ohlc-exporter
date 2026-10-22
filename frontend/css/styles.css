@@ -101,6 +101,19 @@ body {
 @media (prefers-reduced-motion: reduce) { .bar-fill.indeterminate { animation: none; width: 100%; opacity: 0.5; } }
 
 .download { margin-top: 16px; }
+button.secondary {
+  margin-top: 12px;
+  padding: 9px 18px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text, inherit);
+  background: transparent;
+  border: 1px solid var(--border, #8884);
+  border-radius: 8px;
+  cursor: pointer;
+}
+button.secondary:hover:not(:disabled) { border-color: #d33; color: #d33; }
+button.secondary:disabled { opacity: 0.55; cursor: not-allowed; }
 .link-button { display: block; text-align: center; text-decoration: none; }
 .meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 0.85rem; color: var(--muted); flex-wrap: wrap; }
 

@@ -23,12 +23,14 @@ const els = {
   link: $('download-link'),
   meta: $('download-meta'),
   countdown: $('countdown'),
+  cancel: $('cancel'),
 };
 
 let pollTimer = null;
 let tickTimer = null;
 let deadline = 0; // performance.now() value at which the download expires (display only)
 let polling = false;
+let currentJobId = null;
 const state = { latest: '', maxYears: 2, expiry: 5, minDate: '' };
 
 async function api(path, options = {}) {
@@ -92,7 +94,16 @@ function renderJob(job) {
 
   if (job.status === 'PROCESSING' || job.status === 'GENERATING') {
     hideDownload();
-    showStatus('warn', 'Working on it', `${stages[job.stage] ?? 'Processing…'} You can close this page: the server keeps retrieving the data and stores it, so you can request the same range again later.`);
+    currentJobId = job.jobId;
+    // Retrieval can take a long time and continues without this page; from generation onwards the user must stay.
+    const note =
+      job.status === 'GENERATING' || job.stage === 'GENERATING'
+        ? 'do not leave this page, wait and download your data!'
+        : 'data generation might take a while, you can wait and download data or leave this page and comeback later.';
+    showStatus('warn', 'Working on it', `${stages[job.stage] ?? 'Processing…'} ${note}`);
+    els.cancel.classList.remove('hidden');
+    els.cancel.disabled = false;
+    els.cancel.textContent = 'Cancel';
     els.bar.classList.remove('hidden');
     if (job.progress?.total) {
       els.fill.classList.remove('indeterminate');
@@ -108,9 +119,14 @@ function renderJob(job) {
 
   els.bar.classList.add('hidden');
   setBusy(false);
+  // A READY export can still be cancelled (it deletes the file); every other end state has nothing to cancel.
+  currentJobId = job.jobId;
+  els.cancel.classList.toggle('hidden', job.status !== 'READY');
+  els.cancel.disabled = false;
+  els.cancel.textContent = 'Cancel download';
 
   if (job.status === 'READY' && job.download) {
-    showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive)`);
+    showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive). Do not leave this page, wait and download your data!`);
     els.link.href = job.download.url;
     els.link.setAttribute('download', job.download.filename);
     els.meta.textContent = `${job.download.rows.toLocaleString()} rows · ${formatBytes(job.download.fileSize)}`;
@@ -125,11 +141,34 @@ function renderJob(job) {
   hideDownload();
   if (job.status === 'EXPIRED') {
     showStatus('warn', 'Download expired', job.error?.message ?? 'This download has expired. Please generate the data again.');
+  } else if (job.status === 'CANCELLED') {
+    showStatus('warn', 'Cancelled', 'The request was cancelled. Data already retrieved stays saved on the server, so a new request will continue from there.');
   } else if (job.status === 'FAILED') {
     const kept = job.error?.code === 'DATA_NOT_AVAILABLE_YET' ? ' Whatever was retrieved so far is saved on the server and will be continued automatically.' : '';
     showStatus('bad', 'Could not complete the request', `${job.error?.message ?? 'Please try again later.'}${kept}`);
   }
 }
+
+els.cancel.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  els.cancel.disabled = true;
+  els.cancel.textContent = 'Cancelling…';
+  clearTimeout(pollTimer);
+  try {
+    await api(`/api/export/cancel/${encodeURIComponent(currentJobId)}`, { method: 'POST' });
+    // the server finishes cancelling in the background (it may take a moment to stop the retrieval)
+    for (let i = 0; i < 20; i++) {
+      const job = await api(`/api/export/status/${encodeURIComponent(currentJobId)}`);
+      if (job.status !== 'PROCESSING' && job.status !== 'GENERATING') return renderJob(job);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    refreshActive();
+  } catch (err) {
+    els.cancel.disabled = false;
+    els.cancel.textContent = 'Cancel';
+    showStatus('bad', 'Could not cancel', err.message);
+  }
+});
 
 function schedulePoll(jobId) {
   clearTimeout(pollTimer);

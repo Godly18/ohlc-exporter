@@ -70,7 +70,7 @@ export function loadConfig(env = process.env) {
       workflow: str('GH_WORKFLOW_FILE', 'export-csv.yml'),
       ref: str('GH_REF', 'main'),
       apiBase: str('GH_API_BASE', 'https://api.github.com').replace(/\/+$/, ''),
-      runTimeoutSeconds: Math.max(30, int('GH_RUN_TIMEOUT_SECONDS', 600)),
+      runTimeoutSeconds: Math.max(30, int('GH_RUN_TIMEOUT_SECONDS', 3000)),
       startTimeoutSeconds: Math.max(10, int('GH_START_TIMEOUT_SECONDS', 120)), // how long to wait for the run to appear
       pollMs: Math.max(5, int('GH_POLL_MS', 4000)),
       requestTimeoutMs: int('GH_REQUEST_TIMEOUT_MS', 30_000),

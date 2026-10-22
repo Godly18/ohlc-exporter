@@ -9,6 +9,7 @@ export const ExportStatus = Object.freeze({
   READY: 'READY',
   FAILED: 'FAILED',
   EXPIRED: 'EXPIRED',
+  CANCELLED: 'CANCELLED',
 });
 
 function mapExport(r) {
@@ -93,6 +94,16 @@ export function createExportsRepo(db, clock) {
       );
     },
 
+    /** The user cancelled: works for a running job and for a finished (READY) export that has not expired yet. */
+    async markCancelled(jobId) {
+      const res = await db.query(
+        `UPDATE exports SET status = 'CANCELLED', stage = 'CANCELLED', error_code = 'CANCELLED', error_message = 'The request was cancelled.', updated_at = $2
+         WHERE job_id = $1 AND status IN ('PROCESSING', 'GENERATING', 'READY')`,
+        [jobId, clock()],
+      );
+      return res.rowCount === 1;
+    },
+
     async markExpired(jobId) {
       await db.query(`UPDATE exports SET status = 'EXPIRED', stage = 'EXPIRED', updated_at = $2 WHERE job_id = $1 AND status = 'READY'`, [
         jobId,
@@ -117,7 +128,7 @@ export function createExportsRepo(db, clock) {
 
     /** Forget finished rows after a grace period so the table cannot grow forever. */
     async purgeOlderThan(cutoffMs) {
-      const res = await db.query("DELETE FROM exports WHERE status IN ('EXPIRED', 'FAILED') AND updated_at < $1", [cutoffMs]);
+      const res = await db.query("DELETE FROM exports WHERE status IN ('EXPIRED', 'FAILED', 'CANCELLED') AND updated_at < $1", [cutoffMs]);
       return res.rowCount;
     },
   };

@@ -57,4 +57,10 @@ export function exportKey(exportId) {
   return `${EXPORT_PREFIX}${exportId}.zip`;
 }
 
+/** Small JSON the GitHub workflow writes when it finishes: { ok, rows, ... } or { ok:false, code, message }. */
+export function exportResultKey(exportId) {
+  if (!EXPORT_ID_RE.test(exportId)) throw new Error('invalid export id');
+  return `${EXPORT_PREFIX}${exportId}.json`;
+}
+
 export const isExportKey = (key) => typeof key === 'string' && key.startsWith(EXPORT_PREFIX) && !key.includes('..');

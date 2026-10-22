@@ -195,23 +195,26 @@ health check at it. It was designed so it is **not interruptible by the applicat
 * **Database lost** (see the Render free-Postgres note below): fully verified objects in R2 are adopted and metadata is rebuilt with no re-download.
 * **Checkpoints:** long builds store a validated checkpoint every `CHECKPOINT_DAYS` days, so a free-tier restart resumes instead of starting over.
 
-## 6. Temporary exports: built and downloaded on GitHub Actions
+## 6. Retrieval, CSV build and download all run on GitHub Actions
 
-The server no longer reads, zips or serves the CSV in production. After the datasets are verified, it hands the job to a **GitHub Actions workflow**:
+Provider downloads (OANDA / Binance / Twelve Data) were what used most of Render's outbound bandwidth, so in production **the server no longer retrieves, reads, zips or serves anything**. For every request it only:
 
-1. The server (still holding the global lock) calls `workflow_dispatch` on `.github/workflows/export-csv.yml` with the export id, instrument, dates.
-2. The workflow checks out the repo, runs `scripts/export-csv.js`, which **reads the verified yearly `.bin` files from R2** (re-checking identity, SHA-256, ordering,
-   OHLC rules and that the data covers the requested days), writes the CSV, and uploads it as a workflow **artifact**. GitHub delivers artifacts as a `.zip`,
-   so the download is always `<instrument>_<timeframe>_<start>_<end>.zip` with one CSV inside.
-3. The server polls the run (about every 4 s, progress shown to the user), then records the artifact id and releases the lock.
-4. `GET /api/export/download/:token` checks the token and the **server-side 5-minute expiry**, asks GitHub for the artifact's short-lived signed URL and answers
-   **`302` to it**. The file travels GitHub -> browser; this server sends no download bytes (Render's outbound bandwidth is not used).
+1. validates the request, takes the global lock, and calls `workflow_dispatch` on `.github/workflows/export-csv.yml` (`mode=export`, instrument, dates, the last completed day, the job id);
+2. keeps the lock (heartbeat) and mirrors the run: the workflow (`scripts/workflow-job.js` -> `backend/workers/remoteJob.js`) **retrieves the missing days from the provider into R2** with exactly the same
+   rules as before (whole years, checkpoints, gaps, skipped candles), writes its progress straight into the same Postgres (so the progress bar is unchanged), then **reads the verified `.bin` files from R2**,
+   writes the CSV (+ `_missing_data.txt` when needed) and uploads it as a workflow **artifact** (GitHub delivers it as `.zip`);
+3. the workflow leaves a tiny result file `exports/<id>.json` in R2 (the server reads and deletes it) so errors keep their exact meaning ("no data", "not verified yet", provider failure);
+4. `GET /api/export/download/:token` checks the token and the **server-side 5-minute expiry**, asks GitHub for the artifact's signed URL and answers **`302` to it**.
 
+* **Hourly maintenance** also runs on GitHub (`mode=maintenance`): the server only checks in the database whether any dataset is due and, if so, dispatches one run while holding the lock.
+* **Cancel button:** `POST /api/export/cancel/:jobId` aborts retrieval/generation (the GitHub run is cancelled; days already checkpointed stay saved) or, once the ZIP is ready, deletes the artifact so the download stops working. The status becomes `CANCELLED`.
+* The UI text is: during retrieval *"data generation might take a while, you can wait and download data or leave this page and comeback later."*; from generation on *"do not leave this page, wait and download your data!"*.
+* The workflow needs the provider credentials as repository secrets (see section 7). Those providers see GitHub's IP addresses, not Render's.
 * Lifetime is **exactly 5 minutes** (`expires_at = created_at + 5 min`, server clock). After that the token is refused (410) without contacting GitHub.
 * Cleanup (every 60 s and on every startup) deletes the artifact **and the run** once expired. The workflow's `retention-days: 1` is only a safety net.
   Failed runs are kept in the Actions history so their logs can be read.
 * Token = HMAC-SHA256(server secret, random id); the database stores only its SHA-256. The same token is re-issued to the owning browser after a refresh.
-* If the run takes longer than `GH_RUN_TIMEOUT_SECONDS` (600) it is cancelled and the job fails cleanly; the lock is released either way.
+* If the run takes longer than `GH_RUN_TIMEOUT_SECONDS` (3000 = 50 min; the workflow itself times out at 55 min) it is cancelled and the job fails cleanly; the lock is released either way.
 * **Local development / no GitHub configured:** `EXPORT_MODE=server` (the default when `GH_*` are unset) builds the ZIP into R2 `exports/` and streams it from the server, exactly as before.
   Do not use that mode in production if you want to save bandwidth.
 * Cost: public repositories have free Actions minutes; private ones use your plan's minutes (each export is a ~1 minute run). The artifact is deleted by the cleanup minutes after use.
@@ -222,11 +225,12 @@ The server no longer reads, zips or serves the CSV in production. After the data
 ## 7. Deploy on Render (free)
 
 1. Push this folder to **a GitHub repository** (the workflow file `.github/workflows/export-csv.yml` must be in its default branch).
-2. **Cloudflare R2:** create a bucket and an API token with *Object Read & Write* for it (for the server). Create a second, **read-only** token for GitHub.
+2. **Cloudflare R2:** create a bucket and an API token with *Object Read & Write* for it (for the server). The workflow now **writes datasets**, so GitHub needs the same read & write token (or a second read & write token).
 3. **OANDA:** create an API token (practice account recommended to start; `OANDA_ENVIRONMENT=live` for a live account).
 4. **Twelve Data (optional, only for XAU/USD):** create an API key; set `TWELVEDATA_API_KEY`. Without it XAU/USD is hidden. Binance needs no key.
 5. **GitHub repository secrets** (Settings > Secrets and variables > Actions): `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
-   (the read-only token), `R2_BUCKET_NAME`.
+   (read & write), `R2_BUCKET_NAME`, **`DATABASE_URL`** (the same Postgres *external* connection string as Render; `DATABASE_SSL` if you set it there),
+   **`OANDA_API_TOKEN`**, and `TWELVEDATA_API_KEY` for XAU/USD. Optional *variables*: `OANDA_ENVIRONMENT`, `EXTRA_CLOSED_DATES`. Make sure the Render Postgres allows connections from outside Render.
 6. **GitHub token for the server:** Settings > Developer settings > Fine-grained tokens. Resource owner = you, *Only select repositories* = this repo,
    permission **Actions: Read and write** (nothing else). Put it in Render as `GH_EXPORT_TOKEN`, and set `GH_REPO=owner/name`
    (`GH_REF=main` or your default branch).
@@ -265,7 +269,7 @@ npm run smoke            # live check of Postgres, R2, OANDA, Binance, Twelve Da
 
 ## 9. What was tested, and what was NOT
 
-### Actually run (196 automated tests, all passing: `npm test`, about 10 s)
+### Actually run (203 automated tests, all passing: `npm test`, about 10 s)
 | File | Tests | Covers |
 |---|---:|---|
 | `calendar.test.js` | 20 | complete-day logic, no rolling 24h, UTC boundaries, settle window, current/future/inverted/malformed dates, no shortened ranges, cross-month/year, day states |
@@ -280,7 +284,7 @@ npm run smoke            # live check of Postgres, R2, OANDA, Binance, Twelve Da
 | `format2.test.js` | 11 | catalog (68 + 23 + 1, providers, first years), exact decimal parsing, format v2 round trip/tamper/scales, v1 files still decode, CSV decimals |
 | `sources.test.js` | 16 | Binance archive (real zips, checksum, microsecond timestamps, month cache, API fallback, paging, retries) and Twelve Data (windowing, rounding, rate/daily limits, truncation) against faked HTTP |
 | `markets.test.js` | 13 | 2018/2021 year enforcement, XAUUSD hidden without a key, crypto and gold end-to-end builds, leading-vs-mid-history empty days, "no data", provider routing |
-| `github.test.js` | 18 | offload end-to-end (no R2 export object, 302 redirect, zero bytes through the server), 5-minute expiry + artifact/run cleanup, lock held until ready, timeout/cancel, failed or never-started runs, GitHub REST client |
+| `github.test.js` | 25 | offload end-to-end (no R2 export object, 302 redirect, zero bytes through the server), 5-minute expiry + artifact/run cleanup, lock held until ready, timeout/cancel, failed or never-started runs, GitHub REST client |
 | `health.test.js` | 7 | `/health` with no services, DB down, job running, shutting down, no rate limit/redirect/cookie, **latency under heavy CPU work**, and a **real `node backend/server.js` process** booting with no config and exiting 0 on SIGTERM |
 
 ### NOT tested against real infrastructure (nothing here claims otherwise)
@@ -291,7 +295,7 @@ The environment I built this in could not install npm packages (the registry was
   In particular I could not confirm **that your Twelve Data plan includes 1-minute XAU/USD history back to 2021** (the free plan may not), nor the exact
   Binance archive file layout of every pair/month (listing dates differ per pair).
 * **GitHub Actions** (`.github/workflows/export-csv.yml`, the REST calls, the artifact redirect): the REST client is tested against a faked API and the workflow's
-  script (`scripts/export-csv.js`) was run locally for input validation, but the workflow itself has **never run on GitHub**, and the exact response of GitHub's
+  job code (`remoteJob.js`) is exercised by the tests through a fake GitHub, and `scripts/workflow-job.js` was not run against real services; the workflow itself has **never run on GitHub**, and the exact response of GitHub's
   artifact download endpoint (302 with a signed URL) is taken from its documentation.
 * **Render deployment** and the keep-alive ping: not deployed.
 
@@ -324,9 +328,9 @@ backend/middleware/  http helpers (session, headers, rate limit), static files
 backend/services/    oanda/ binance/ twelvedata/ github/ sources/ r2/ datasets/ exports/ jobs/
 backend/workers/     cleanup + recovery, maintenance, keep-alive
 scripts/smoke.js     live-infrastructure check
-scripts/export-csv.js  runs inside GitHub Actions: R2 -> verified CSV
+scripts/workflow-job.js  runs inside GitHub Actions: retrieval (provider -> R2) + CSV build, or maintenance
 .github/workflows/export-csv.yml   the export workflow
-tests/               196 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
+tests/               203 tests + helpers (in-memory R2, fake OANDA/Binance/Twelve Data/GitHub, harness)
 docs/BINARY_FORMAT.md
 render.yaml  .env.example  package.json
 ```

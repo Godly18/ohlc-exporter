@@ -7,35 +7,23 @@ import { csvOptionsFor } from '../../lib/exportFile.js';
 import { zipFiles } from '../../lib/zip.js';
 import { getInstrument, getTimeframe } from '../../config/catalog.js';
 import { buildGapReport } from '../../lib/gaps.js';
-import {
-  AbortedError,
-  AppError,
-  DataNotReadyError,
-  Errors,
-  MESSAGES,
-} from '../../lib/errors.js';
+import { AbortedError, describeError, Errors, MESSAGES } from '../../lib/errors.js';
 import { deriveDownloadToken, newExportId, newJobId, sha256Hex, TOKEN_RE } from '../../lib/tokens.js';
 import { addDays, dayStartSec, latestFetchableDay, utcDateOf, yearEndDate, yearOf, yearStartDate, yearsInRange } from '../../lib/time.js';
 import { validateExportRequest } from '../../lib/validation.js';
 import { ExportStatus } from '../../database/exportsRepo.js';
 import { exportKey } from '../r2/keys.js';
+import { parseGithubKey } from '../github/client.js';
 
-export function createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport = null }) {
+export function createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport = null, github = null }) {
   const inflight = new Set();
+  const live = new Map(); // jobId -> { handle, cancelled }
 
-  function mapError(err, handle) {
-    if (err instanceof AppError) return { code: err.code, message: err.message };
-    if (err instanceof DataNotReadyError) return { code: 'DATA_NOT_AVAILABLE_YET', message: MESSAGES.notVerified };
-    if (err instanceof AbortedError || err?.name === 'AbortError' || handle.signal.aborted) {
-      return { code: 'JOB_INTERRUPTED', message: MESSAGES.interrupted };
-    }
-    return { code: 'DATASET_FAILURE', message: MESSAGES.datasetFailure };
-  }
+  const mapError = (err, handle, cancelled) => describeError(err, { aborted: handle.signal.aborted, cancelled });
 
   async function runJob(handle, job) {
     const { jobId, exportId, instrument, timeframe, start, end } = job;
     let objectKey = null;
-    let ghKey = null;
     let lastProgressWrite = 0;
     const onProgress = (p) => {
       const now = Date.now();
@@ -45,6 +33,46 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
     };
 
     try {
+      if (config.exportMode === 'github' && githubExport) {
+        // Production: the provider download (retrieval), the CSV build and the ZIP all happen on GitHub Actions,
+        // so this server spends no outbound bandwidth on them. We hold the lock and mirror the run's status.
+        logger.info('handing the whole export to GitHub Actions', { jobId, instrument, timeframe, start, end });
+        const art = await githubExport.generate({
+          exportId,
+          jobId,
+          instrument,
+          timeframe,
+          start,
+          end,
+          lastDay: latestFetchableDay(clock(), config.daySettleMinutes),
+          signal: handle.signal,
+          onStatus: (st) => {
+            if (st === 'dispatch') exportsRepo.updateProgress(jobId, { stage: 'DATASETS', label: 'Starting the data retrieval on GitHub…' }).catch(() => {});
+            else if (st === 'queued') exportsRepo.updateProgress(jobId, { stage: 'DATASETS', label: 'Waiting for GitHub to start…' }).catch(() => {});
+            // while running, the workflow writes its own detailed progress into the database
+          },
+        });
+        handle.signal.throwIfAborted();
+        const createdAt = clock();
+        const expiresAt = createdAt + config.exportExpirationMinutes * 60_000;
+        const ok = await exportsRepo.markReady(jobId, {
+          objectKey: art.objectKey,
+          fileSize: art.size,
+          rowCount: art.rows ?? 0,
+          tokenHash: sha256Hex(deriveDownloadToken(config.exportTokenSecret, exportId)),
+          createdAt,
+          expiresAt,
+        });
+        if (!ok) {
+          // cancelled (or failed by recovery) while the run was finishing: do not leave the artifact behind
+          await github?.deleteArtifact(art.artifactId).catch(() => {});
+          await github?.deleteRun(art.runId).catch(() => {});
+          throw new AbortedError('job was no longer active');
+        }
+        logger.info('export ready', { jobId, rows: art.rows, bytes: art.size, mode: 'github', expiresAt: new Date(expiresAt).toISOString() });
+        return;
+      }
+
       const nowYear = yearOf(utcDateOf(clock()));
       const years = yearsInRange(start, end);
       const loaded = [];
@@ -82,25 +110,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       if (rows === 0) throw Errors.noData(); // e.g. a pair that was not listed yet, or a range the provider has no candles for
 
       let fileSize;
-      if (config.exportMode === 'github' && githubExport) {
-        // Production: GitHub Actions reads the datasets from R2, builds and zips the CSV, and the user
-        // downloads it from GitHub (the download link redirects there). Nothing is streamed by this server.
-        logger.info('handing the export to GitHub Actions', { jobId, instrument, timeframe, start, end });
-        loaded.length = 0; // free the in-memory datasets while GitHub works
-        segments.length = 0;
-        const art = await githubExport.generate({
-          exportId,
-          instrument,
-          timeframe,
-          start,
-          end,
-          signal: handle.signal,
-          onProgress: (p) => exportsRepo.updateProgress(jobId, p).catch(() => {}),
-        });
-        objectKey = null; // nothing to clean up in R2
-        ghKey = art.objectKey;
-        fileSize = art.size;
-      } else {
+      {
         // Local/development mode: the server builds the ZIP into R2 and streams it itself.
         objectKey = exportKey(exportId);
         const inst = getInstrument(instrument);
@@ -132,7 +142,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
       const expiresAt = createdAt + config.exportExpirationMinutes * 60_000;
       const token = deriveDownloadToken(config.exportTokenSecret, exportId);
       const ok = await exportsRepo.markReady(jobId, {
-        objectKey: ghKey ?? objectKey,
+        objectKey,
         fileSize,
         rowCount: rows,
         tokenHash: sha256Hex(token),
@@ -140,13 +150,17 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         expiresAt,
       });
       if (!ok) throw new AbortedError('job was no longer active');
-      logger.info('export ready', { jobId, rows, bytes: fileSize, mode: ghKey ? 'github' : 'server', expiresAt: new Date(expiresAt).toISOString() });
+      logger.info('export ready', { jobId, rows, bytes: fileSize, mode: 'server', expiresAt: new Date(expiresAt).toISOString() });
     } catch (err) {
-      const mapped = mapError(err, handle);
-      logger.error('export failed', { jobId, code: mapped.code, error: err });
+      const cancelled = live.get(jobId)?.cancelled === true;
+      const mapped = mapError(err, handle, cancelled);
+      if (cancelled) logger.info('export cancelled by the user', { jobId });
+      else logger.error('export failed', { jobId, code: mapped.code, error: err });
       if (objectKey) await storage.deleteObject(objectKey).catch(() => {}); // never leave a partial CSV behind
-      await exportsRepo.markFailed(jobId, mapped).catch((e) => logger.error('could not mark export failed', { jobId, error: e }));
+      if (cancelled) await exportsRepo.markCancelled(jobId).catch((e) => logger.error('could not mark export cancelled', { jobId, error: e }));
+      else await exportsRepo.markFailed(jobId, mapped).catch((e) => logger.error('could not mark export failed', { jobId, error: e }));
     } finally {
+      live.delete(jobId);
       await handle.finish(); // lock released only AFTER the row reached READY/FAILED
     }
   }
@@ -157,6 +171,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
     let error = null;
     if (status === ExportStatus.READY && row.expiresAt <= now) status = ExportStatus.EXPIRED; // server is authoritative
     if (status === ExportStatus.EXPIRED) error = { code: 'EXPORT_EXPIRED', message: MESSAGES.expired };
+    if (status === ExportStatus.CANCELLED) error = { code: 'CANCELLED', message: MESSAGES.cancelled };
     if (status === ExportStatus.FAILED) error = { code: row.errorCode, message: row.errorMessage };
 
     let download = null;
@@ -207,12 +222,42 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         throw err;
       }
 
+      live.set(jobId, { handle, cancelled: false });
       const task = runJob(handle, { jobId, exportId, ...params }).catch((err) =>
         logger.error('unexpected job error', { jobId, error: err }),
       );
       inflight.add(task);
       task.finally(() => inflight.delete(task));
       return { jobId, status: ExportStatus.PROCESSING };
+    },
+
+    /**
+     * Cancel everything for this job: retrieval, generation (the GitHub run is stopped) and, when the ZIP is
+     * already built, the download (the artifact is deleted and the link stops working).
+     */
+    async cancel(jobId, sessionHash) {
+      const row = await exportsRepo.get(jobId);
+      if (!row || row.sessionHash !== sessionHash) throw Errors.notFound();
+      const running = live.get(jobId);
+      if (running && (row.status === ExportStatus.PROCESSING || row.status === ExportStatus.GENERATING)) {
+        running.cancelled = true;
+        running.handle.abort('cancelled by the user'); // runJob marks the row CANCELLED and releases the lock
+        return { jobId, status: ExportStatus.CANCELLED };
+      }
+      if (row.status === ExportStatus.READY) {
+        if (!(await exportsRepo.markCancelled(jobId))) return view(await exportsRepo.get(jobId));
+        const gh = parseGithubKey(row.objectKey);
+        try {
+          if (gh && github) {
+            await github.deleteArtifact(gh.artifactId);
+            await github.deleteRun(gh.runId).catch(() => {});
+          } else if (row.objectKey && !gh) await storage.deleteObject(row.objectKey);
+        } catch (err) {
+          logger.warn('could not delete the cancelled export file (it expires on its own)', { jobId, error: err });
+        }
+        return { jobId, status: ExportStatus.CANCELLED };
+      }
+      return view(row); // already finished/failed/expired: nothing to cancel
     },
 
     /** Resolves when no export job is running (used by tests and graceful shutdown). */
@@ -236,6 +281,7 @@ export function createExportService({ exportsRepo, datasetService, storage, runn
         v.status === ExportStatus.PROCESSING ||
         v.status === ExportStatus.GENERATING ||
         v.status === ExportStatus.READY ||
+        (v.status === ExportStatus.CANCELLED && age < 2 * 60_000) ||
         (v.status === ExportStatus.EXPIRED && age < 30 * 60_000) ||
         (v.status === ExportStatus.FAILED && age < 10 * 60_000);
       return { active: keep ? v : null, serverTime: v.serverTime };

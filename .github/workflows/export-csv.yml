@@ -1,10 +1,18 @@
-# Builds one CSV export from the verified yearly datasets in Cloudflare R2 and publishes it as a workflow
-# artifact. The web app triggers this (workflow_dispatch), waits for it, and then redirects the user's
-# browser to the artifact download, so download traffic never goes through the Render server.
+# Does ALL the heavy work for the web app, so the Render server's outbound bandwidth is not used for it:
+#   mode=export       retrieves the data from the provider (OANDA / Binance / Twelve Data) into Cloudflare R2 when it
+#                     is not stored yet, builds the CSV (+ missing-data report) and publishes it as a workflow
+#                     artifact, which the user's browser downloads through the app's redirect.
+#   mode=maintenance  the hourly catch-up of already stored datasets.
+# The web app triggers it (workflow_dispatch), keeps the global lock, shows the progress this run writes to the
+# database, and can cancel it (the "Cancel" button cancels this run).
 #
 # Required repository secrets (Settings > Secrets and variables > Actions):
-#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
-# Use a READ-ONLY R2 API token here: this workflow only ever reads.
+#   DATABASE_URL        the SAME Postgres connection string the web app uses (external URL)
+#   DATABASE_SSL        optional, same value as on the web app (e.g. "true")
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME   (token needs READ + WRITE)
+#   OANDA_API_TOKEN     forex pairs   (OANDA_ENVIRONMENT as a repository variable if not "practice")
+#   TWELVEDATA_API_KEY  XAU/USD
+# Optional repository variable: EXTRA_CLOSED_DATES.  Binance needs no key.
 
 name: Export CSV
 run-name: export ${{ inputs.export_id }}
@@ -16,29 +24,45 @@ on:
         description: Export id (used to find this run)
         required: true
         type: string
+      mode:
+        description: export or maintenance
+        required: false
+        default: export
+        type: string
+      job_id:
+        required: false
+        type: string
       instrument:
-        required: true
+        required: false
         type: string
       timeframe:
-        required: true
+        required: false
         type: string
       start_date:
-        required: true
+        required: false
         type: string
       end_date:
-        required: true
+        required: false
+        type: string
+      last_day:
+        description: Last completed UTC day the web app allows
+        required: false
         type: string
       artifact_name:
-        required: true
+        required: false
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: oanda-export # the web app already allows one job at a time; this is a safety net
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -49,24 +73,34 @@ jobs:
       - name: Install dependencies
         run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
 
-      - name: Build CSV from R2
+      - name: Retrieve data and build the CSV
         env:
           # Inputs are passed as environment variables, never interpolated into the script.
+          JOB_MODE: ${{ inputs.mode }}
+          EXPORT_ID: ${{ inputs.export_id }}
+          JOB_ID: ${{ inputs.job_id }}
           INSTRUMENT: ${{ inputs.instrument }}
           TIMEFRAME: ${{ inputs.timeframe }}
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
+          LAST_DAY: ${{ inputs.last_day }}
           ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_SSL: ${{ secrets.DATABASE_SSL }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          OANDA_API_TOKEN: ${{ secrets.OANDA_API_TOKEN }}
+          OANDA_ENVIRONMENT: ${{ vars.OANDA_ENVIRONMENT }}   # optional repository variable
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           EXTRA_CLOSED_DATES: ${{ vars.EXTRA_CLOSED_DATES }}   # optional repository variable
-        run: node scripts/export-csv.js
+        run: node scripts/workflow-job.js
 
       # GitHub always delivers an artifact as a .zip: the CSV (and the missing-data report, when there is one)
       # are compressed into it by GitHub.
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.mode != 'maintenance' }}
         with:
           name: ${{ inputs.artifact_name }}
           path: |

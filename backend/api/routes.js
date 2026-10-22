@@ -67,6 +67,15 @@ export function createRoutes(ctx) {
       },
     },
     {
+      method: 'POST',
+      prefix: '/api/export/cancel/',
+      async handle(req, res, { sessionHash, param }) {
+        requireReady();
+        if (!JOB_ID_RE.test(param)) throw Errors.notFound();
+        sendJson(res, 200, await svc().exportService.cancel(param, sessionHash));
+      },
+    },
+    {
       method: 'GET',
       prefix: '/api/export/status/',
       async handle(_req, res, { sessionHash, param }) {

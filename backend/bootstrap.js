@@ -20,10 +20,10 @@ export function createServices({ config, logger, clock, db, storage, oanda, bina
   const runner = createJobRunner({ lock, logger, heartbeatMs: config.lockHeartbeatSeconds * 1000, leaseMs, clock });
   const source = createMarketData({ oanda, binance, twelvedata });
   const datasetService = createDatasetService({ repo: datasetsRepo, storage, source, config, logger, clock });
-  const githubExport = github ? createGithubExport({ github: config.github, client: github, logger }) : null;
-  const exportService = createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport });
+  const githubExport = github ? createGithubExport({ github: config.github, client: github, storage, logger }) : null;
+  const exportService = createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport, github });
   const cleanup = createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, github, config, logger, clock });
-  const maintenance = createMaintenanceWorker({ datasetsRepo, datasetService, runner, config, logger, clock });
+  const maintenance = createMaintenanceWorker({ datasetsRepo, datasetService, runner, config, logger, clock, githubExport: config.exportMode === 'github' ? githubExport : null });
 
   return { db, storage, github, datasetsRepo, exportsRepo, lock, runner, datasetService, exportService, cleanup, maintenance };
 }

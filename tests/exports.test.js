@@ -288,6 +288,22 @@ describe('single global job, no queue', () => {
     assert.equal(await h.services.lock.current(), null);
   });
 
+  it('Cancel stops the retrieval in server mode, keeps the last checkpoint and frees the lock', async () => {
+    h = await createHarness();
+    let release;
+    h.oanda.gate = new Promise((r) => (release = r));
+    const c = h.browser();
+    const started = await c.request('/api/export', { method: 'POST', body: body('2026-09-01', '2026-09-02') });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await c.request(`/api/export/cancel/${started.json.jobId}`, { method: 'POST' })).status, 200);
+    release();
+    const done = await h.waitForJob(c, started.json.jobId);
+    assert.equal(done.status, 'CANCELLED');
+    assert.equal(await h.services.lock.current(), null);
+    assert.deepEqual(await h.storage.listObjects('exports/'), []);
+    assert.equal((await c.request('/api/export/active')).json.active?.status, 'CANCELLED');
+  });
+
   it('maintenance and a user job can never run at the same time (either order)', async () => {
     h = await createHarness();
     await h.services.datasetService.ensure({ instrument: 'EUR_USD', timeframe: 'M1', year: 2026, through: '2026-09-10' });

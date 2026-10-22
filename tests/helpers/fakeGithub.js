@@ -2,23 +2,33 @@
 // builder (the same code scripts/export-csv.js runs) against the in-memory R2 and stores the result as an
 // artifact (a zip containing the CSV, like GitHub delivers).
 
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { writeExportCsv } from '../../backend/lib/exportFile.js';
 import { zipFiles } from '../../backend/lib/zip.js';
+import { runRemoteExport, runRemoteMaintenance } from '../../backend/workers/remoteJob.js';
 
+/**
+ * A "dispatch" really runs what scripts/workflow-job.js runs on GitHub (retrieval from the fake providers into
+ * the in-memory R2, then the CSV build) and stores the output as an artifact (a zip, like GitHub delivers).
+ * Call attach() once the services exist (the harness does).
+ */
 export function createFakeGithub({ storage }) {
   let nextRun = 1000;
   let nextArtifact = 5000;
+  let env = null;
   const fake = {
-    runs: new Map(), // id -> { id, title, status, conclusion, artifactName, artifactId, error }
+    attach(e) {
+      env = e;
+    },
+    runs: new Map(), // id -> { id, title, status, conclusion, inputs, controller }
     artifacts: new Map(), // id -> { id, name, zip: Buffer, runId }
     dispatched: [],
     calls: [],
     downloadUrls: [],
-    mode: 'success', // 'success' | 'fail' | 'hang' | 'never-starts'
+    mode: 'success', // 'success' | 'fail' (crashes without a result) | 'hang' | 'never-starts'
     pollsUntilDone: 1,
+    startDelayMs: 0, // delay before the "workflow" starts working (lets tests cancel mid-run)
     deletedArtifacts: [],
     deletedRuns: [],
     cancelled: [],
@@ -27,38 +37,51 @@ export function createFakeGithub({ storage }) {
       fake.calls.push('dispatch');
       fake.dispatched.push(inputs);
       if (fake.mode === 'never-starts') return;
-      const run = { id: nextRun++, title: `export ${inputs.export_id}`, status: 'queued', conclusion: null, polls: 0, inputs };
+      const controller = new AbortController();
+      const run = { id: nextRun++, title: `export ${inputs.export_id}`, status: 'queued', conclusion: null, polls: 0, inputs, controller };
       fake.runs.set(run.id, run);
       const work = async () => {
         if (fake.mode === 'hang') return;
+        if (fake.startDelayMs) await new Promise((r) => setTimeout(r, fake.startDelayMs));
         try {
-          if (fake.mode === 'fail') throw new Error('simulated failure');
+          if (fake.mode === 'fail') throw new Error('simulated crash');
+          if (controller.signal.aborted) throw new Error('cancelled');
+          if (inputs.mode === 'maintenance') {
+            await runRemoteMaintenance({ maintenance: env.services.maintenance, signal: controller.signal, logger: env.logger });
+            run.conclusion = 'success';
+            return;
+          }
           const dir = mkdtempSync(path.join(tmpdir(), 'gh-'));
-          const outFile = path.join(dir, `${inputs.artifact_name}.csv`);
-          const reportFile = path.join(dir, `${inputs.artifact_name}_missing_data.txt`);
-          const written = await writeExportCsv({
+          const result = await runRemoteExport({
+            job: {
+              jobId: inputs.job_id,
+              exportId: inputs.export_id,
+              artifactName: inputs.artifact_name,
+              lastDay: inputs.last_day,
+              instrument: inputs.instrument,
+              timeframe: inputs.timeframe,
+              start: inputs.start_date,
+              end: inputs.end_date,
+            },
+            datasetService: env.services.datasetService,
+            exportsRepo: env.services.exportsRepo,
             storage,
-            instrument: inputs.instrument,
-            timeframe: inputs.timeframe,
-            start: inputs.start_date,
-            end: inputs.end_date,
-            outFile,
-            reportFile,
-            extraClosedDates: new Set(),
+            config: { ...env.config, extraClosedDates: new Set() },
+            logger: env.logger,
+            signal: controller.signal,
+            outDir: dir,
           });
-          const csv = readFileSync(outFile);
+          if (!result.ok) throw new Error(`workflow reported ${result.code}`);
+          const entries = readdirSync(dir).map((name) => ({ name, source: [readFileSync(path.join(dir, name))] }));
           const parts = [];
-          const entries = [{ name: `${inputs.artifact_name}.csv`, source: [csv] }];
-          if (written.reported) entries.push({ name: `${inputs.artifact_name}_missing_data.txt`, source: [readFileSync(reportFile)] });
           for await (const p of zipFiles(entries, Date.now())) parts.push(p);
           const id = nextArtifact++;
           fake.artifacts.set(id, { id, name: inputs.artifact_name, zip: Buffer.concat(parts), runId: run.id });
           run.conclusion = 'success';
         } catch (err) {
           run.error = err;
-          run.conclusion = 'failure';
+          run.conclusion = controller.signal.aborted ? 'cancelled' : 'failure';
         }
-        run.ready = true;
       };
       run.done = work();
     },
@@ -97,6 +120,7 @@ export function createFakeGithub({ storage }) {
 
     async cancelRun(id) {
       fake.cancelled.push(id);
+      fake.runs.get(id)?.controller.abort(new Error('cancelled'));
     },
     async deleteArtifact(id) {
       fake.deletedArtifacts.push(id);

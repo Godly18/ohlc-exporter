@@ -171,7 +171,7 @@ describe('GitHub Actions offload', () => {
     h.github.mode = 'fail';
     const job = await run(h.browser(), body('EUR_USD', '2026-09-01', '2026-09-02'));
     assert.equal(job.status, 'FAILED');
-    assert.match(job.error.message, /could not be built/);
+    assert.match(job.error.message, /could not be prepared/);
     assert.equal(h.github.deletedRuns.length, 0);
     assert.deepEqual(await h.storage.listObjects('exports/'), []);
   });
@@ -196,14 +196,87 @@ describe('GitHub Actions offload', () => {
     assert.match(unzipAll(artifact.zip)[1].data.toString(), /2026-09-09 \(Wed\)/);
   });
 
-  it('reports "no data" before ever calling GitHub', async () => {
+  it('reports "no data" (the workflow publishes the reason; nothing is built)', async () => {
     h = await createHarness({ useGithub: true, binanceOpts: { listedFrom: '2026-09-10' } });
     const job = await run(h.browser(), body('LINKBTC', '2026-09-01', '2026-09-05'));
+    assert.equal(job.status, 'FAILED');
     assert.equal(job.error.code, 'NO_DATA');
-    assert.equal(h.github.dispatched.length, 0);
+    assert.equal(h.github.artifacts.size, 0);
+    assert.deepEqual(await h.storage.listObjects('exports/'), [], 'the result file is removed once read');
   });
 
-  it('keeps dataset building (R2) on the server and never leaks the token', async () => {
+  it('provider failures are reported with the specific reason, and the retrieved days stay saved', async () => {
+    h = await createHarness({ useGithub: true });
+    h.oanda.incompleteDays.add('2026-09-13');
+    const job = await run(h.browser(), body('EUR_USD', '2026-09-01', '2026-09-13'));
+    assert.equal(job.error.code, 'DATA_NOT_AVAILABLE_YET');
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-12');
+  });
+
+  it('retrieval runs in the workflow: the dispatch carries the last completed day and the job id', async () => {
+    h = await createHarness({ useGithub: true });
+    const job = await run(h.browser(), body('EUR_USD', '2026-09-01', '2026-09-02'));
+    assert.equal(job.status, 'READY', JSON.stringify(job.error));
+    const inputs = h.github.dispatched[0];
+    assert.equal(inputs.mode, 'export');
+    assert.equal(inputs.last_day, '2026-09-13');
+    assert.equal(inputs.job_id, job.jobId);
+    assert.ok(h.oanda.calls.length > 0, 'the provider was called (by the workflow)');
+    // the whole year so far was retrieved, not just the requested days
+    assert.equal((await h.services.datasetsRepo.get('EUR_USD', 'M1', 2026)).lastCompleteDate, '2026-09-13');
+  });
+
+  it('the Cancel button: stops a running GitHub export, cancels the run and frees the lock', async () => {
+    h = await createHarness({ useGithub: true });
+    h.github.mode = 'hang';
+    const c = h.browser();
+    const s = await c.request('/api/export', { method: 'POST', body: body('EUR_USD', '2026-09-01', '2026-09-02') });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await c.request(`/api/export/cancel/${s.json.jobId}`, { method: 'POST' })).status, 200);
+    const done = await h.waitForJob(c, s.json.jobId);
+    assert.equal(done.status, 'CANCELLED');
+    assert.equal(done.error.code, 'CANCELLED');
+    assert.equal(h.github.cancelled.length, 1, 'the GitHub run was cancelled');
+    assert.equal(await h.services.lock.current(), null);
+    h.github.mode = 'success';
+    assert.equal((await run(h.browser(), body('EUR_USD', '2026-09-03', '2026-09-04'))).status, 'READY');
+  });
+
+  it('Cancel after the ZIP is ready deletes the artifact and the download stops working', async () => {
+    h = await createHarness({ useGithub: true });
+    const c = h.browser();
+    const job = await run(c, body('EUR_USD', '2026-09-01', '2026-09-02'));
+    assert.equal(job.status, 'READY');
+    assert.equal((await c.request(`/api/export/cancel/${job.jobId}`, { method: 'POST' })).status, 200);
+    assert.equal(h.github.artifacts.size, 0);
+    assert.equal((await c.request(job.download.url)).status, 410);
+    assert.equal((await c.request(`/api/export/status/${job.jobId}`)).json.status, 'CANCELLED');
+  });
+
+  it('Cancel is per browser session and ignores finished or unknown jobs', async () => {
+    h = await createHarness({ useGithub: true });
+    const c = h.browser();
+    const job = await run(c, body('EUR_USD', '2026-09-01', '2026-09-02'));
+    assert.equal((await h.browser().request(`/api/export/cancel/${job.jobId}`, { method: 'POST' })).status, 404);
+    assert.equal((await c.request('/api/export/cancel/not-a-job', { method: 'POST' })).status, 404);
+    assert.equal(h.github.artifacts.size, 1, 'a stranger cannot delete it');
+  });
+
+  it('hourly maintenance runs on GitHub when something is due, and not at all when everything is current', async () => {
+    h = await createHarness({ useGithub: true, env: { EXPORT_MODE: 'github' } });
+    await h.services.datasetService.ensure({ instrument: 'EUR_USD', timeframe: 'M1', year: 2026, through: '2026-09-10' });
+    h.oanda.calls.length = 0;
+    const res = await h.services.maintenance.runOnce();
+    assert.equal(res.remote, true);
+    assert.equal(h.github.dispatched.at(-1).mode, 'maintenance');
+    assert.deepEqual(h.oanda.calls.map((x) => x.date), ['2026-09-11', '2026-09-12', '2026-09-13']);
+    assert.equal(await h.services.lock.current(), null);
+    h.github.dispatched.length = 0;
+    assert.equal((await h.services.maintenance.runOnce()).remote, false);
+    assert.equal(h.github.dispatched.length, 0, 'nothing due: no workflow run');
+  });
+
+  it('writes the datasets to R2 (from the workflow) and never leaks the token', async () => {
     h = await createHarness({ useGithub: true });
     const c = h.browser();
     await run(c, body('EUR_USD', '2026-09-01', '2026-09-02'));

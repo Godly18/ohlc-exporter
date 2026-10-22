@@ -56,6 +56,7 @@ export async function createHarness({ now = '2026-09-14T12:00:00Z', env = {}, oa
   const github = useGithub ? createFakeGithub({ storage }) : null;
   const services = createServices({ config, logger, clock: clock.now, db, storage, oanda, binance, twelvedata, github, owner: 'test' });
 
+  github?.attach({ services, config, logger });
   const state = { ready: true, shuttingDown: false, missing: [], startedAt: clock.now() };
   const ctx = { config, logger, state, clock: clock.now, services };
   const handler = createApp(ctx);

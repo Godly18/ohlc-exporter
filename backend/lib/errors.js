@@ -11,6 +11,7 @@ export const MESSAGES = Object.freeze({
   datasetFailure: 'The requested historical data could not be prepared at this time. Please try again later.',
   future: 'Invalid date range. Future dates cannot be requested.',
   expired: 'This download has expired. Please generate the data again.',
+  cancelled: 'The request was cancelled.',
   interrupted: 'The request was interrupted before it finished. Please try again.',
   starting: 'The service is starting up. Please try again in a moment.',
   misconfigured: 'The service is not fully configured yet. Please try again later.',
@@ -101,4 +102,13 @@ export class SourceError extends Error {
     this.status = status;
     this.retryable = retryable;
   }
+}
+
+/** Safe, user-facing { code, message } for any error (raw provider/database text is never shown to users). */
+export function describeError(err, { aborted = false, cancelled = false } = {}) {
+  if (cancelled) return { code: 'CANCELLED', message: MESSAGES.cancelled };
+  if (err instanceof AppError) return { code: err.code, message: err.message };
+  if (err instanceof DataNotReadyError) return { code: 'DATA_NOT_AVAILABLE_YET', message: MESSAGES.notVerified };
+  if (aborted || err instanceof AbortedError || err?.name === 'AbortError') return { code: 'JOB_INTERRUPTED', message: MESSAGES.interrupted };
+  return { code: 'DATASET_FAILURE', message: MESSAGES.datasetFailure };
 }
