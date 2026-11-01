@@ -88,6 +88,9 @@ export function loadConfig(env = process.env) {
     exportTokenSecret: str('EXPORT_TOKEN_SECRET'),
     exportExpirationMinutes: Math.max(1, int('EXPORT_EXPIRATION_MINUTES', 5)),
     cleanupIntervalSeconds: Math.max(5, int('CLEANUP_INTERVAL_SECONDS', 60)),
+    // While no export has been active recently the cleanup worker does NOT touch the database, so a
+    // serverless Postgres (Neon) can suspend. This is the safety-net sweep interval for that idle state.
+    cleanupIdleSweepMinutes: Math.max(1, int('CLEANUP_IDLE_SWEEP_MINUTES', 360)),
     checkpointDays: Math.max(1, int('CHECKPOINT_DAYS', 30)),
     maxExportYears: Math.max(1, Math.min(10, int('MAX_EXPORT_YEARS', 2))),
 

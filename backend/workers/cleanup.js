@@ -4,6 +4,12 @@
 //  - sweepOrphans(): removes untracked old CSVs and abandoned *.tmp staging objects.
 //  - startupRecovery(): all of the above, once, before the API accepts traffic.
 // Cleanup only ever deletes keys under exports/ (plus *.tmp staging); permanent *.bin data is never touched.
+//
+// DATABASE-FRIENDLY SCHEDULING: the timer still fires every CLEANUP_INTERVAL_SECONDS, but a tick only
+// queries the database while the worker is "hot" (an export was created / became READY within the last
+// exportExpirationMinutes + a short grace) or when the idle safety sweep is due (CLEANUP_IDLE_SWEEP_MINUTES).
+// Otherwise the tick is a no-op in memory, so a serverless Postgres (e.g. Neon free) can auto-suspend.
+// Correctness is unaffected: downloads check expires_at themselves, and startupRecovery() still runs in full.
 
 import { MESSAGES } from '../lib/errors.js';
 import { parseGithubKey } from '../services/github/client.js';
@@ -11,13 +17,22 @@ import { DATA_PREFIX, EXPORT_PREFIX, isExportKey } from '../services/r2/keys.js'
 
 const ORPHAN_GRACE_MS = 15 * 60_000;
 const ROW_RETENTION_MS = 60 * 60_000;
+const HOT_GRACE_MS = 2 * 60_000; // keep ticking this long after the last export expires
 
 export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, github = null, config, logger, clock }) {
   let timer = null;
   let running = false;
   let ticks = 0;
+  let hotUntil = 0; // ticks query the DB while clock() < hotUntil
+  let lastFullTickAt = clock(); // last time a full tick (or startup recovery) ran
+  const idleSweepMs = config.cleanupIdleSweepMinutes * 60_000;
 
   const worker = {
+    /** An export was created or became READY: keep the cleanup ticking until it has expired and been deleted. */
+    markActive() {
+      hotUntil = Math.max(hotUntil, clock() + config.exportExpirationMinutes * 60_000 + HOT_GRACE_MS);
+    },
+
     async runExpiredCleanup() {
       const now = clock();
       const expired = await exportsRepo.listReadyExpired(now);
@@ -90,6 +105,8 @@ export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, 
     },
 
     async startupRecovery() {
+      worker.markActive(); // exports that were READY before a restart still need their expiry handled
+      lastFullTickAt = clock();
       await worker.reconcile();
       const cleanup = await worker.runExpiredCleanup();
       const orphans = await worker.sweepOrphans().catch((err) => {
@@ -101,12 +118,17 @@ export function createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, 
 
     async tick() {
       if (running) return;
+      const now = clock();
+      const hot = now < hotUntil;
+      const sweepDue = now - lastFullTickAt >= idleSweepMs;
+      if (!hot && !sweepDue) return; // idle: touch nothing, so the database can suspend
       running = true;
       try {
         ticks++;
+        lastFullTickAt = now;
         await worker.reconcile();
         await worker.runExpiredCleanup();
-        if (ticks % 15 === 0) await worker.sweepOrphans();
+        if (sweepDue || ticks % 15 === 0) await worker.sweepOrphans();
       } catch (err) {
         logger.error('cleanup tick failed', { error: err });
       } finally {

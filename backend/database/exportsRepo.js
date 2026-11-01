@@ -40,7 +40,8 @@ function mapExport(r) {
   };
 }
 
-export function createExportsRepo(db, clock) {
+/** `onActivity` (optional) is called whenever an export is created or becomes READY, so the cleanup worker knows work is coming. */
+export function createExportsRepo(db, clock, { onActivity = () => {} } = {}) {
   const one = async (sql, params) => mapExport((await db.query(sql, params)).rows[0]);
 
   return {
@@ -53,6 +54,7 @@ export function createExportsRepo(db, clock) {
          VALUES ($1,$2,$3,$4,$5,$6,$7,'PROCESSING','STARTING',$8,$8)`,
         [row.jobId, row.exportId, row.sessionHash, row.instrument, row.timeframe, row.startDate, row.endDate, now],
       );
+      onActivity();
     },
 
     get: (jobId) => one('SELECT * FROM exports WHERE job_id = $1', [jobId]),
@@ -83,6 +85,7 @@ export function createExportsRepo(db, clock) {
          WHERE job_id = $1 AND status IN ('PROCESSING', 'GENERATING')`,
         [jobId, objectKey, fileSize, rowCount, tokenHash, createdAt, expiresAt],
       );
+      onActivity();
       return res.rowCount === 1;
     },
 

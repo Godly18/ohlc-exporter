@@ -15,7 +15,9 @@ import { createMaintenanceWorker } from './workers/maintenance.js';
 export function createServices({ config, logger, clock, db, storage, oanda, binance = null, twelvedata = null, github = null, owner = `pid-${process.pid}` }) {
   const leaseMs = config.lockLeaseSeconds * 1000;
   const datasetsRepo = createDatasetsRepo(db, clock);
-  const exportsRepo = createExportsRepo(db, clock);
+  // The exports repo tells the cleanup worker when an export is created / becomes READY (see workers/cleanup.js).
+  let wakeCleanup = () => {};
+  const exportsRepo = createExportsRepo(db, clock, { onActivity: () => wakeCleanup() });
   const lock = createGlobalLock(db, { leaseMs, clock, owner });
   const runner = createJobRunner({ lock, logger, heartbeatMs: config.lockHeartbeatSeconds * 1000, leaseMs, clock });
   const source = createMarketData({ oanda, binance, twelvedata });
@@ -23,6 +25,7 @@ export function createServices({ config, logger, clock, db, storage, oanda, bina
   const githubExport = github ? createGithubExport({ github: config.github, client: github, storage, logger }) : null;
   const exportService = createExportService({ exportsRepo, datasetService, storage, runner, config, logger, clock, githubExport, github });
   const cleanup = createCleanupWorker({ exportsRepo, datasetsRepo, lock, storage, github, config, logger, clock });
+  wakeCleanup = cleanup.markActive;
   const maintenance = createMaintenanceWorker({ datasetsRepo, datasetService, runner, config, logger, clock, githubExport: config.exportMode === 'github' ? githubExport : null });
 
   return { db, storage, github, datasetsRepo, exportsRepo, lock, runner, datasetService, exportService, cleanup, maintenance };

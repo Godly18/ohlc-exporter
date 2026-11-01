@@ -247,6 +247,48 @@ describe('cleanup of temporary exports', () => {
   });
 });
 
+describe('idle cleanup does not touch the database (lets Neon suspend)', () => {
+  const countQueries = (hh) => {
+    const state = { n: 0 };
+    const orig = hh.db.query.bind(hh.db);
+    hh.db.query = (...args) => {
+      state.n++;
+      return orig(...args);
+    };
+    return state;
+  };
+
+  it('idle ticks run zero queries, an export wakes the worker, the idle sweep still runs', async () => {
+    h = await createHarness({ env: { CLEANUP_IDLE_SWEEP_MINUTES: '360' } });
+    await h.services.cleanup.startupRecovery();
+    h.clock.advance(10 * 60_000); // startup hot window (5 min expiry + 2 min grace) is over
+    const q = countQueries(h);
+
+    for (let i = 0; i < 20; i++) {
+      h.clock.advance(60_000);
+      await h.services.cleanup.tick();
+    }
+    assert.equal(q.n, 0, 'idle ticks must not query the database');
+
+    const c = h.browser();
+    await generate(c, '2026-09-01', '2026-09-03');
+    q.n = 0;
+    h.clock.advance(5 * 60_000); // export expired, still inside the hot window
+    await h.services.cleanup.tick();
+    assert.ok(q.n > 0, 'an export keeps the worker ticking until it is deleted');
+    assert.equal(exportsInStorage(h).length, 0);
+
+    h.clock.advance(30 * 60_000); // hot window over
+    q.n = 0;
+    await h.services.cleanup.tick();
+    assert.equal(q.n, 0, 'back to idle after the export is gone');
+
+    h.clock.advance(6 * 60 * 60_000); // idle safety sweep is due
+    await h.services.cleanup.tick();
+    assert.ok(q.n > 0, 'the idle safety sweep still reconciles and purges');
+  });
+});
+
 describe('single global job, no queue', () => {
   it('second request gets SYSTEM BUSY immediately; nothing is queued; lock frees afterwards', async () => {
     h = await createHarness();
