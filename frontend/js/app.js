@@ -24,6 +24,7 @@ const els = {
   meta: $('download-meta'),
   countdown: $('countdown'),
   cancel: $('cancel'),
+  eta: $('eta'),
 };
 
 let pollTimer = null;
@@ -49,11 +50,82 @@ async function api(path, options = {}) {
   return body;
 }
 
-function showStatus(kind, title, text) {
+function showStatus(kind, title, text, { wait = false } = {}) {
   els.status.classList.remove('hidden');
   els.title.className = `status-title ${kind}`;
   els.title.textContent = title;
   els.text.textContent = text ?? '';
+  if (wait) {
+    const w = document.createElement('strong');
+    w.className = 'wait';
+    w.textContent = 'WAIT!';
+    els.text.append(' ', w);
+  }
+}
+
+// ---- Estimated time to finish the data retrieval (shown bottom-right while days are being downloaded) ----
+// Progress from the server is "days downloaded in the current year"; the rate is measured over a sliding window of
+// recent polls and carried over from one year to the next. Years after the current one are counted as full years
+// (the current UTC year only up to yesterday); if one is already stored the estimate simply drops when it is reached.
+const ETA_WINDOW_MS = 90_000;
+const ETA_MIN_SPAN_MS = 4_000;
+let eta = null;
+
+function resetEta() {
+  eta = null;
+  els.eta.classList.add('hidden');
+  els.eta.textContent = '';
+}
+
+function daysInYear(year) {
+  const todayYear = state.latest ? Number(state.latest.slice(0, 4)) : null;
+  if (todayYear === year) {
+    const start = Date.UTC(year, 0, 1);
+    const [y, m, d] = state.latest.split('-').map(Number);
+    return Math.round((Date.UTC(y, m - 1, d) - start) / 86_400_000) + 1;
+  }
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 366 : 365;
+}
+
+function formatEta(seconds) {
+  const s = Math.max(5, Math.ceil(seconds / 5) * 5); // steady, 5-second steps
+  if (s < 60) return `${s} sec`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${String(s % 60).padStart(2, '0')} sec`;
+  const h = Math.floor(m / 60);
+  return `${h} h ${String(m % 60).padStart(2, '0')} min`;
+}
+
+function updateEta(job) {
+  const p = job.progress;
+  const year = Number(/^(\d{4}):/.exec(p?.label ?? '')?.[1]);
+  if (job.stage !== 'DOWNLOADING' || !p?.total || !year) return resetEta();
+
+  const now = performance.now();
+  if (!eta || eta.jobId !== job.jobId) eta = { jobId: job.jobId, year, total: p.total, base: 0, samples: [] };
+  if (year !== eta.year) {
+    eta.base += eta.total; // the previous year finished
+    eta.year = year;
+    eta.total = p.total;
+  }
+  const cumulative = eta.base + p.current;
+  const last = eta.samples[eta.samples.length - 1];
+  if (!last || cumulative > last.done) eta.samples.push({ t: now, done: cumulative });
+  while (eta.samples.length > 2 && now - eta.samples[0].t > ETA_WINDOW_MS) eta.samples.shift();
+
+  els.eta.classList.remove('hidden');
+  const first = eta.samples[0];
+  const newest = eta.samples[eta.samples.length - 1];
+  const span = newest.t - first.t;
+  if (eta.samples.length < 2 || span < ETA_MIN_SPAN_MS) {
+    els.eta.textContent = 'Estimating time left…';
+    return;
+  }
+  const rate = (newest.done - first.done) / (span / 1000); // days per second
+  const { endDate } = job.request;
+  let remainingDays = Math.max(0, p.total - p.current);
+  for (let y = year + 1; y <= Number(endDate.slice(0, 4)); y++) remainingDays += daysInYear(y);
+  els.eta.textContent = rate > 0 ? `Est. time left: ~${formatEta(remainingDays / rate)}` : 'Estimating time left…';
 }
 
 function setBusy(busy) {
@@ -95,12 +167,22 @@ function renderJob(job) {
   if (job.status === 'PROCESSING' || job.status === 'GENERATING') {
     hideDownload();
     currentJobId = job.jobId;
-    // Retrieval can take a long time and continues without this page; from generation onwards the user must stay.
-    const note =
-      job.status === 'GENERATING' || job.stage === 'GENERATING'
-        ? 'do not leave this page, wait and download your data!'
-        : 'data generation might take a while, you can wait and download data or leave this page and comeback later.';
-    showStatus('warn', 'Working on it', `${stages[job.stage] ?? 'Processing…'} ${note}`);
+    // Three phases of the message:
+    //  1. preparing (STARTING / DATASETS, before any day is downloaded): label + a bold "WAIT!"
+    //  2. downloading: the day being retrieved + the "you can leave and come back" note; the estimate shows bottom-right
+    //  3. generating: the user must stay on the page
+    const generating = job.status === 'GENERATING' || job.stage === 'GENERATING';
+    const downloading = !generating && job.stage === 'DOWNLOADING';
+    const label = stages[job.stage] ?? 'Processing…';
+    if (generating) {
+      showStatus('warn', 'Working on it', `${label} do not leave this page, wait and download your data!`);
+    } else if (downloading) {
+      showStatus('warn', 'Working on it', `${label} data generation might take a while, you can wait and download data or leave this page and comeback later.`);
+    } else {
+      showStatus('warn', 'Working on it', label, { wait: true });
+    }
+    if (downloading) updateEta(job);
+    else resetEta();
     els.cancel.classList.remove('hidden');
     els.cancel.disabled = false;
     els.cancel.textContent = 'Cancel';
@@ -118,6 +200,7 @@ function renderJob(job) {
   }
 
   els.bar.classList.add('hidden');
+  resetEta();
   setBusy(false);
   // A READY export can still be cancelled (it deletes the file); every other end state has nothing to cancel.
   currentJobId = job.jobId;
@@ -228,13 +311,15 @@ els.form.addEventListener('submit', async (event) => {
         end_date: els.end.value,
       }),
     });
-    showStatus('warn', 'Working on it', 'Starting…');
+    resetEta();
+    showStatus('warn', 'Working on it', 'Starting…', { wait: true });
     els.bar.classList.remove('hidden');
     els.fill.classList.add('indeterminate');
     schedulePoll(job.jobId);
   } catch (err) {
     setBusy(false);
     els.bar.classList.add('hidden');
+    resetEta();
     const kind = err.code === 'SYSTEM_BUSY' || err.code === 'DATA_NOT_AVAILABLE_YET' ? 'warn' : 'bad';
     showStatus(kind, err.code === 'SYSTEM_BUSY' ? 'System busy' : 'Request not accepted', err.message);
   }

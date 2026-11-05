@@ -93,6 +93,12 @@ body {
 .status-title.warn { color: var(--warn); }
 .status-title.bad { color: var(--bad); }
 .status-text { color: var(--muted); font-size: 0.95rem; }
+.status-text .wait { color: var(--warn); font-weight: 800; letter-spacing: 0.06em; margin-left: 4px; }
+
+/* Cancel button on the left, estimated time to finish the data retrieval in the lower-right corner */
+.status-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.eta { margin-top: 12px; margin-left: auto; font-size: 0.9rem; font-weight: 600; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.eta.hidden { display: none; }
 
 .bar { height: 8px; border-radius: 99px; background: var(--line); margin-top: 14px; overflow: hidden; }
 .bar-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.4s ease; }
