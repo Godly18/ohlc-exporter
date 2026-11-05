@@ -93,6 +93,7 @@ body {
 .status-title.warn { color: var(--warn); }
 .status-title.bad { color: var(--bad); }
 .status-text { color: var(--muted); font-size: 0.95rem; }
+.status-text .alert { color: var(--bad); font-weight: 800; text-transform: uppercase; letter-spacing: 0.02em; }
 .status-text .wait { color: var(--warn); font-weight: 800; letter-spacing: 0.06em; margin-left: 4px; }
 
 /* Cancel button on the left, estimated time to finish the data retrieval in the lower-right corner */

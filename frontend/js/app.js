@@ -50,11 +50,18 @@ async function api(path, options = {}) {
   return body;
 }
 
-function showStatus(kind, title, text, { wait = false } = {}) {
+function showStatus(kind, title, text, { wait = false, alert = '' } = {}) {
   els.status.classList.remove('hidden');
   els.title.className = `status-title ${kind}`;
   els.title.textContent = title;
   els.text.textContent = text ?? '';
+  if (alert) {
+    // urgent instruction: bold, capitals, red
+    const a = document.createElement('strong');
+    a.className = 'alert';
+    a.textContent = alert;
+    els.text.append(' ', a);
+  }
   if (wait) {
     const w = document.createElement('strong');
     w.className = 'wait';
@@ -175,7 +182,7 @@ function renderJob(job) {
     const downloading = !generating && job.stage === 'DOWNLOADING';
     const label = stages[job.stage] ?? 'Processing…';
     if (generating) {
-      showStatus('warn', 'Working on it', `${label} do not leave this page, wait and download your data!`);
+      showStatus('warn', 'Working on it', label, { alert: 'do not leave this page, wait and download your data!' });
     } else if (downloading) {
       showStatus('warn', 'Working on it', `${label} data generation might take a while, you can wait and download data or leave this page and comeback later.`);
     } else {
@@ -209,7 +216,7 @@ function renderJob(job) {
   els.cancel.textContent = 'Cancel download';
 
   if (job.status === 'READY' && job.download) {
-    showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive). Do not leave this page, wait and download your data!`);
+    showStatus('ok', 'Your ZIP is ready (contains the CSV).', `${job.request.instrument} ${job.request.timeframe}, ${job.request.startDate} to ${job.request.endDate} (UTC, inclusive).`, { alert: 'Do not leave this page, wait and download your data!' });
     els.link.href = job.download.url;
     els.link.setAttribute('download', job.download.filename);
     els.meta.textContent = `${job.download.rows.toLocaleString()} rows · ${formatBytes(job.download.fileSize)}`;
